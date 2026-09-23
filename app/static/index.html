@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="theme-color" content="#0d1117" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
+    <link rel="apple-touch-icon" href="/static/icon.svg" />
+    <title>Plants</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="top" id="top" hidden>
+      <div class="wrap topbar">
+        <a class="logo" href="#/"><img src="/static/icon.svg" alt="" width="34" height="34" /><span id="app-name">Plants</span></a>
+        <span class="spacer"></span>
+        <span class="user-badge" id="user-badge"></span>
+        <button class="small" id="logout" type="button">Sign out</button>
+      </div>
+      <nav class="wrap tabs" id="tabs" aria-label="Sections">
+        <a class="tab" href="#/" data-tab="today">Today</a>
+        <a class="tab" href="#/plants" data-tab="plants">Plants</a>
+        <a class="tab" href="#/settings" data-tab="settings">Settings</a>
+      </nav>
+    </header>
+    <main class="wrap" id="view" aria-live="polite"></main>
+    <div class="modal" id="modal" hidden><div class="sheet" role="dialog" aria-modal="true" id="sheet"></div></div>
+    <div class="toast" id="toast" role="status" hidden></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
