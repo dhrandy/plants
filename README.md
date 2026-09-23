@@ -31,6 +31,11 @@ Plants is a simple household plant care log with reminders. It shows what needs 
          - PLANTS_COOKIE_SECURE=${PLANTS_COOKIE_SECURE:-false}
          # IP of your reverse proxy, so login rate limits see real client addresses.
          - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
+         # Browser push. Generate a key pair once (see "Browser push" in the readme); leave empty to keep push off.
+         - PLANTS_VAPID_PUBLIC_KEY=${PLANTS_VAPID_PUBLIC_KEY:-}
+         - PLANTS_VAPID_PRIVATE_KEY=${PLANTS_VAPID_PRIVATE_KEY:-}
+         # Contact the push services can reach you at: mailto:you@example.com or your https:// address.
+         - PLANTS_VAPID_SUBJECT=${PLANTS_VAPID_SUBJECT:-}
        ports:
          - 8653:8000
    ```
@@ -48,7 +53,7 @@ Fresh installs start with one example plant that you can edit or delete.
 
 ### Using a Docker manager
 
-Any tool that accepts a compose file works: paste the compose block above into a new stack in Portainer, Dockhand, CasaOS, Synology Container Manager, or similar, and fill in `TZ` in its environment settings. Make sure the `./data` volume points somewhere that is backed up.
+Any tool that accepts a compose file works: paste the compose block above into a new stack in Portainer, Dockhand, CasaOS, Synology Container Manager, or similar, and fill in `TZ` (and the VAPID keys, if you want browser push) in its environment settings. Make sure the `./data` volume points somewhere that is backed up.
 
 ## Features
 
@@ -62,6 +67,7 @@ Any tool that accepts a compose file works: paste the compose block above into a
 - **Seasons**: choose your winter months and a winter stretch (x1.25, x1.5, x2), or set a winter interval on a specific task. Nothing changes a schedule behind your back.
 - **Weather**: current conditions and a 5-day forecast (temperature, humidity, rain chance and amount) for a location you pick, with plain hints like "Rain likely tomorrow; outdoor pots may not need water". Weather never changes schedules.
 - **Notifications**: daily digest or one alert per plant through [Apprise](https://github.com/caronc/apprise), with quiet hours, a send-from hour, repeat reminders for overdue plants, and links back to the plant.
+- **Browser push**: each person can turn on push notifications on their own phone or computer in Settings. Reminders show up even when Plants is closed, follow the same schedule as Apprise, and tapping one opens Today.
 - **Multi-user**: one shared set of plants for the household. Administrators manage users; every care entry records who did it.
 - **API tokens** for scripts, home automation, or an AI assistant.
 - **Backup**: export everything, photos included, as one JSON file, and import it back.
@@ -92,6 +98,49 @@ See the [Apprise wiki](https://github.com/caronc/apprise/wiki) for every service
 - **App address**: your public URL, so alerts link straight to the plant.
 
 The server checks every 10 minutes. Each due date is announced once. Notification URLs often contain secrets; they are stored in the database and only administrators can see them.
+
+## Browser push
+
+Plants can send care reminders straight to a browser or an installed home-screen app, with no Apprise service needed. Push uses the same schedule as Apprise (send-from hour, quiet hours, repeat overdue, digest or one per plant) and works alongside it. If one channel fails, the other still goes out.
+
+**1. Generate a VAPID key pair once.** The keys identify your server to the browsers' push services. Run:
+
+```sh
+docker run --rm ghcr.io/dhrandy/plants:latest python -m app.vapid
+```
+
+It prints two lines:
+
+```
+PLANTS_VAPID_PUBLIC_KEY=BExamplePublicKey...
+PLANTS_VAPID_PRIVATE_KEY=ExamplePrivateKey...
+```
+
+Any VAPID generator works too, for example `npx web-push generate-vapid-keys`. Keep the private key secret: don't commit it or paste it anywhere public.
+
+**2. Add them to the compose file** (or your Docker manager's environment settings), plus a contact address for the push services, then redeploy:
+
+```yaml
+      - PLANTS_VAPID_PUBLIC_KEY=BExamplePublicKey...
+      - PLANTS_VAPID_PRIVATE_KEY=ExamplePrivateKey...
+      - PLANTS_VAPID_SUBJECT=mailto:you@example.com
+```
+
+`PLANTS_VAPID_SUBJECT` can be `mailto:` an email address or your `https://` address. If you leave it empty, Plants uses the **App address** from Settings when it's https, or a placeholder. Apple's push service is picky, so set it.
+
+Keep the same keys from then on. If you replace them, every device has to turn push off and on again.
+
+**3. Turn it on per device.** Open **Settings → Push notifications** on each phone or computer, tick **Push on this device**, and allow notifications when the browser asks. **Send test push** checks it end to end. Each person manages their own devices; the settings page shows how many other devices you have push on.
+
+Things to know:
+
+- **HTTPS is required.** Browsers only allow push on `https://` sites (or `localhost`). Put Plants behind a reverse proxy with a certificate first; see below.
+- **iPhone and iPad** (iOS/iPadOS 16.4 or later): push only works in the installed app. In Safari tap Share, then **Add to Home Screen**, open Plants from the home screen, and turn push on there.
+- **Android and desktop**: Chrome, Edge, Firefox, Brave, Opera, and Safari on macOS all work in a normal tab or installed.
+- If you block notifications for the site, allow them again in the browser's site settings, then reload.
+- Devices that uninstall the app or expire their subscription are removed automatically the next time Plants tries to reach them. Signing out also turns push off for that device.
+- Disabled users get no push.
+- The server only sends to the known push services (Google, Mozilla, Apple, Microsoft). If a browser uses a different one, add its host with `PLANTS_PUSH_HOSTS`.
 
 ## API tokens
 
@@ -147,7 +196,11 @@ Built in: passwords hashed with PBKDF2, HttpOnly SameSite=Strict session cookies
 | `PLANTS_COOKIE_SECURE` | `false` | Send session cookies only over HTTPS |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse proxy IPs |
 | `PLANTS_DATA_DIR` | `/app/data` | Where the database and photos live |
-| `PLANTS_NOTIFY_WORKER` | `true` | Set `false` to turn off the notification checker |
+| `PLANTS_NOTIFY_WORKER` | `true` | Set `false` to turn off the notification checker (Apprise and push) |
+| `PLANTS_VAPID_PUBLIC_KEY` | empty | Browser push public key; see [Browser push](#browser-push) |
+| `PLANTS_VAPID_PRIVATE_KEY` | empty | Browser push private key; keep it secret |
+| `PLANTS_VAPID_SUBJECT` | App address or placeholder | `mailto:` or `https://` contact sent to push services |
+| `PLANTS_PUSH_HOSTS` | empty | Extra push service hosts to allow, comma-separated |
 | `PLANTS_WEATHER_OFFLINE` | `false` | Set `true` to never call the weather service |
 
 ## Development
@@ -159,7 +212,7 @@ PYTHONPATH=. pytest -q
 PLANTS_DATA_DIR=./data uvicorn app.main:app --reload
 ```
 
-The test suite covers the API and runs browser tests at 1920px and 390px. GitHub Actions runs it on every push to `main` before building and publishing the image to `ghcr.io/dhrandy/plants`.
+The test suite covers the API (including real push encryption, checked by decrypting it with a browser-style key) and runs browser tests at 1920px and 390px. The push browser test uses full Chromium, which `playwright install chromium` includes. GitHub Actions runs it on every push to `main` before building and publishing the image to `ghcr.io/dhrandy/plants`.
 
 ## Credits
 
