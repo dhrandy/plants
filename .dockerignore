@@ -1,0 +1,8 @@
+.git
+.env
+data
+*.db
+__pycache__
+*.py[cod]
+.pytest_cache
+tests/screenshots
