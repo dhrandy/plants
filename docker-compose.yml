@@ -17,5 +17,7 @@ services:
       - PLANTS_VAPID_PRIVATE_KEY=${PLANTS_VAPID_PRIVATE_KEY:-}
       # Contact the push services can reach you at: mailto:you@example.com or your https:// address.
       - PLANTS_VAPID_SUBJECT=${PLANTS_VAPID_SUBJECT:-}
+      # Photo identification with Pl@ntNet. Get a free key at https://my.plantnet.org/ (see "Photo identification" in the readme); leave empty to keep it off.
+      - PLANTS_PLANTNET_API_KEY=${PLANTS_PLANTNET_API_KEY:-}
     ports:
       - 8653:8000
