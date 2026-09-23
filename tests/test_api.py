@@ -218,3 +218,192 @@ def test_export_import_roundtrip(tmp_path):
         assert "Keep me" in names
         photo = next(x for x in c.get("/api/plants").json() if x["name"] == "Keep me")["photo"]
         assert c.get(photo).status_code == 200
+
+
+# ---------------------------------------------------------------- browser push
+
+FCM = "https://fcm.googleapis.com/fcm/send/"
+
+
+def fake_browser_keys():
+    """A receiver key pair like the one a browser makes for a push subscription."""
+    import base64
+    import secrets as pysecrets
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    pub = key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    auth = pysecrets.token_bytes(16)
+    b64 = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")  # noqa: E731
+    return key, auth, {"p256dh": b64(pub), "auth": b64(auth)}
+
+
+def enable_push(monkeypatch):
+    from app import vapid
+
+    public, private = vapid.generate()
+    monkeypatch.setenv("PLANTS_VAPID_PUBLIC_KEY", public)
+    monkeypatch.setenv("PLANTS_VAPID_PRIVATE_KEY", private)
+    return public
+
+
+def test_push_config_validation_and_per_user_subscriptions(tmp_path, monkeypatch):
+    fresh(tmp_path)
+    monkeypatch.delenv("PLANTS_VAPID_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("PLANTS_VAPID_PRIVATE_KEY", raising=False)
+    keys = fake_browser_keys()[2]
+    with TestClient(main.app) as c:
+        assert c.get("/api/push").status_code == 401
+        setup_admin(c)
+        info = c.get("/api/push").json()
+        assert info["configured"] is False and info["public_key"] == "" and info["problem"] == ""
+        assert c.post("/api/push/subscribe", json={"endpoint": FCM + "a", "keys": keys}).status_code == 503
+        # a mismatched pair is reported, not used
+        from app import vapid
+        monkeypatch.setenv("PLANTS_VAPID_PUBLIC_KEY", vapid.generate()[0])
+        monkeypatch.setenv("PLANTS_VAPID_PRIVATE_KEY", vapid.generate()[1])
+        info = c.get("/api/push").json()
+        assert info["configured"] is False and "match" in info["problem"]
+        public = enable_push(monkeypatch)
+        info = c.get("/api/push").json()
+        assert info["configured"] is True and info["public_key"] == public
+        # only real push services, https only, well-formed keys
+        for bad in ("https://evil.example.com/push", "http://fcm.googleapis.com/fcm/send/x",
+                    "https://fcm.googleapis.com.evil.example/x", "https://user:pw@fcm.googleapis.com/x"):
+            assert c.post("/api/push/subscribe", json={"endpoint": bad, "keys": keys}).status_code == 400, bad
+        assert c.post("/api/push/subscribe", json={"endpoint": FCM + "a", "keys": {"p256dh": "not base64!" * 3, "auth": "x" * 16}}).status_code == 422
+        r = c.post("/api/push/subscribe", json={"endpoint": FCM + "a", "keys": keys})
+        assert r.status_code == 200 and r.json()["subscribed"] is True and r.json()["devices"] == 1
+        # re-subscribing the same endpoint doesn't duplicate it
+        assert c.post("/api/push/subscribe", json={"endpoint": FCM + "a", "keys": keys}).json()["devices"] == 1
+        assert c.get("/api/push", params={"endpoint": FCM + "a"}).json()["subscribed"] is True
+        assert c.post("/api/users", json={"username": "member-one", "password": "password-123"}).status_code == 200
+    with TestClient(main.app) as m:
+        assert m.post("/api/login", json={"username": "member-one", "password": "password-123"}).status_code == 200
+        assert m.get("/api/push").json()["devices"] == 0
+        m.post("/api/push/subscribe", json={"endpoint": "https://updates.push.services.mozilla.com/wpush/v2/b", "keys": keys})
+        # can't remove or test someone else's device
+        m.post("/api/push/unsubscribe", json={"endpoint": FCM + "a"})
+        assert m.post("/api/push/test", json={"endpoint": FCM + "a"}).status_code == 404
+        assert m.get("/api/push").json()["devices"] == 1
+    with main.db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM push_subscriptions").fetchone()[0] == 2
+
+
+def test_push_follows_notification_schedule_and_drops_expired(tmp_path, monkeypatch):
+    from datetime import datetime
+    fresh(tmp_path)
+    enable_push(monkeypatch)
+    keys = fake_browser_keys()[2]
+    sent = []
+
+    def fake_send(sub, payload, subject):
+        import json as _json
+        if sub["endpoint"].endswith("gone"):
+            raise main.PushGone("410")
+        sent.append((sub["endpoint"], _json.loads(payload)))
+
+    monkeypatch.setattr(main, "webpush_send", fake_send)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        c.post("/api/plants", json={"name": "Fern", "room": "Bath",
+                                     "tasks": [{"kind": "water", "interval_days": 3, "last_done": days_ago(5)}]})
+        c.put("/api/notifications", json={"notify_urls": "", "notify_hour": 8, "quiet_start": 21, "quiet_end": 7,
+                                           "overdue_repeat_days": 2, "public_url": ""})
+        c.post("/api/push/subscribe", json={"endpoint": FCM + "phone", "keys": keys})
+        c.post("/api/push/subscribe", json={"endpoint": FCM + "gone", "keys": keys})
+        c.post("/api/users", json={"username": "off-user", "password": "password-123"})
+        uid = [u for u in c.get("/api/users").json() if u["username"] == "off-user"][0]["id"]
+    with main.db() as conn:  # a disabled user's device gets nothing
+        conn.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth,created_at) VALUES(?,?,?,?,?)",
+                     (uid, FCM + "disabled", keys["p256dh"], keys["auth"], "2026-01-01"))
+        conn.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
+    today = date.today()
+    at = lambda h, d=0: datetime(today.year, today.month, today.day, h) + timedelta(days=d)  # noqa: E731
+    assert main.run_notification_check(at(22)) == 0  # quiet hours
+    assert main.run_notification_check(at(7)) == 0  # before send hour
+    assert not sent
+    assert main.run_notification_check(at(9)) == 2  # example pothos + fern, no Apprise URLs needed
+    assert [e for e, _ in sent] == [FCM + "phone"]
+    msg = sent[0][1]
+    assert msg["title"].endswith("2 plants to check") and msg["url"] == "/#/"
+    assert "Fern (Bath) - overdue 2 days" in msg["body"]
+    with main.db() as conn:
+        endpoints = {r[0] for r in conn.execute("SELECT endpoint FROM push_subscriptions")}
+    assert FCM + "gone" not in endpoints and FCM + "phone" in endpoints
+    assert main.run_notification_check(at(10)) == 0  # already announced
+    assert main.run_notification_check(at(9, 2)) >= 1  # overdue repeat
+    # one alert per plant uses a tag per task so repeats replace, not stack
+    sent.clear()
+    with TestClient(main.app) as c:
+        c.post("/api/login", json={"username": "admin-test", "password": "password-123"})
+        c.put("/api/notifications", json={"notify_urls": "", "notify_mode": "each"})
+    with main.db() as conn:
+        main.set_setting(conn, "push_state", "{}")
+    assert main.run_notification_check(at(9)) == 2
+    assert len(sent) == 2 and all(m["tag"].startswith("plants-task-") for _, m in sent)
+
+
+def test_push_and_apprise_fail_independently(tmp_path, monkeypatch):
+    from datetime import datetime
+    fresh(tmp_path)
+    enable_push(monkeypatch)
+    keys = fake_browser_keys()[2]
+    pushed = []
+    monkeypatch.setattr(main, "webpush_send", lambda sub, payload, subject: pushed.append(payload))
+    monkeypatch.setattr(main, "send_notification", lambda urls, title, body: (False, "down"))
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        c.put("/api/notifications", json={"notify_urls": "json://localhost", "notify_hour": 0, "quiet_start": 0, "quiet_end": 0})
+        c.post("/api/push/subscribe", json={"endpoint": FCM + "x", "keys": keys})
+    now = datetime.now().replace(hour=12)
+    try:
+        main.run_notification_check(now)
+        raise AssertionError("expected the Apprise failure to be reported")
+    except RuntimeError as exc:
+        assert "apprise" in str(exc)
+    assert len(pushed) == 1  # push still went out
+    with main.db() as conn:
+        assert main.get_setting(conn, "notify_state", "{}") in ("", "{}")  # Apprise will retry
+
+
+def test_push_payload_is_encrypted_and_vapid_signed(tmp_path, monkeypatch):
+    """Real pywebpush encryption: the browser's key must be able to decrypt what we send."""
+    import base64
+    import json as _json
+
+    import http_ece
+    import pywebpush
+
+    fresh(tmp_path)
+    public = enable_push(monkeypatch)
+    receiver, auth, keys = fake_browser_keys()
+    posted = []
+
+    class Resp:
+        status_code = 201
+        text = ""
+        headers: dict = {}
+
+    def fake_post(url, data=None, headers=None, timeout=None, **kw):
+        posted.append((url, data, headers))
+        return Resp()
+
+    monkeypatch.setattr(pywebpush.requests, "post", fake_post)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        c.post("/api/push/subscribe", json={"endpoint": FCM + "real", "keys": keys})
+        assert c.post("/api/push/test", json={"endpoint": FCM + "real"}).json() == {"ok": True}
+    url, body, headers = posted[0]
+    assert url == FCM + "real"
+    assert headers["content-encoding"] == "aes128gcm" and int(headers["ttl"]) == main.PUSH_TTL_SECONDS
+    assert f"k={public}" in headers["authorization"]
+    plain = http_ece.decrypt(body, private_key=receiver, auth_secret=auth, version="aes128gcm")
+    msg = _json.loads(plain)
+    assert msg["title"].endswith("test notification") and msg["url"] == "/#/"
+    # JWT audience is the push service origin
+    jwt = headers["authorization"].split("t=")[1].split(",")[0]
+    claims = _json.loads(base64.urlsafe_b64decode(jwt.split(".")[1] + "=="))
+    assert claims["aud"] == "https://fcm.googleapis.com" and claims["sub"] == "mailto:admin@example.com"
