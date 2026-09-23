@@ -1,0 +1,16 @@
+services:
+  plants:
+    image: ghcr.io/dhrandy/plants:latest
+    container_name: plants
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      # Your timezone, so "due today" and quiet hours match your clock.
+      - TZ=${TZ:-UTC}
+      # Set to true once Plants is served over HTTPS (reverse proxy).
+      - PLANTS_COOKIE_SECURE=${PLANTS_COOKIE_SECURE:-false}
+      # IP of your reverse proxy, so login rate limits see real client addresses.
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    ports:
+      - 8653:8000
