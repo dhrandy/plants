@@ -1,0 +1,13 @@
+{
+  "name": "Plants",
+  "short_name": "Plants",
+  "description": "A simple household plant care log with reminders.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
