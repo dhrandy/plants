@@ -1,4 +1,4 @@
-const CACHE = "plants-static-v3";
+const CACHE = "plants-static-v4";
 const STATIC = ["/static/manifest.json", "/static/icon.svg"];
 self.addEventListener("install", (event) =>
   event.waitUntil(
