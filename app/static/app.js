@@ -83,7 +83,7 @@ function openModal(html, onOpen) {
   document.body.style.overflow = "hidden";
   $$("[data-close]", modal).forEach((b) => (b.onclick = closeModal));
   if (onOpen) onOpen($("#sheet"));
-  const first = $("input:not([type=hidden]):not([type=checkbox]), select, textarea", $("#sheet"));
+  const first = $("input:not([type=hidden]):not([type=checkbox]):not([type=file]), select, textarea", $("#sheet"));
   if (first && window.innerWidth > 650) first.focus();
 }
 
@@ -476,9 +476,19 @@ function taskRow(t = {}) {
 
 async function plantForm(p) {
   const rooms = await api("/api/rooms");
+  const identify = await api("/api/identify").catch(() => ({ configured: false }));
   const isNew = !p;
   openModal(`<h2>${isNew ? "Add plant" : "Edit plant"}</h2>
     <form id="plant-form">
+      <div class="stack" style="margin-bottom:12px"><div><label for="id-photo">Identify from a photo</label>
+        ${identify.configured ? `<div class="row">
+          <input id="id-photo" type="file" accept="image/*">
+          <button type="button" class="small" id="id-go" disabled>Identify</button>
+        </div>
+        <p class="hint" id="id-hint">A sharp photo of leaves or flowers works best. The photo goes to Pl@ntNet just to identify; it isn't saved.</p>
+        <div class="results" id="id-results"></div>` : `<p class="hint" id="id-hint">Photo identification isn't set up on this server.
+          ${state.me.is_admin ? "Add PLANTS_PLANTNET_API_KEY to the compose file; see Photo identification in the readme." : "Ask an administrator to add a Pl@ntNet API key."}</p>`}
+      </div></div>
       ${isNew ? `<div class="stack" style="margin-bottom:12px"><div><label for="lib">Start from the starter library (optional)</label>
         <select id="lib"><option value="">Blank plant</option></select>
         <p class="hint">Fills in suggested care you can change. Intervals are when to check the soil, not a strict watering schedule.</p></div></div>` : ""}
@@ -503,6 +513,37 @@ async function plantForm(p) {
     </form>`, async (sheet) => {
     const form = $("#plant-form", sheet);
     const bindRm = () => $$("[data-rm]", sheet).forEach((b) => (b.onclick = () => b.closest(".task-edit").remove()));
+    if (identify.configured) {
+      const idHintText = "A sharp photo of leaves or flowers works best. The photo goes to Pl@ntNet just to identify; it isn't saved.";
+      const file = $("#id-photo", sheet), go = $("#id-go", sheet), hint = $("#id-hint", sheet), results = $("#id-results", sheet);
+      file.onchange = () => { go.disabled = !file.files[0]; results.innerHTML = ""; hint.textContent = idHintText; };
+      go.onclick = async () => {
+        if (!file.files[0]) return;
+        go.disabled = true;
+        go.textContent = "Identifying…";
+        results.innerHTML = "";
+        hint.textContent = idHintText;
+        try {
+          const fd = new FormData();
+          fd.append("photo", file.files[0]);
+          const res = await api("/api/identify", { method: "POST", form: fd });
+          results.innerHTML = res.suggestions.length
+            ? res.suggestions.map((s, i) => `<button type="button" data-id-pick="${i}">${s.common ? `<b>${esc(s.common)}</b> · ` : ""}<i>${esc(s.scientific)}</i><span class="muted"> · ${s.score}% match</span></button>`).join("")
+            : '<p class="muted">No matches for that photo. Try a closer shot of leaves or flowers.</p>';
+          $$("[data-id-pick]", results).forEach((b) => (b.onclick = () => {
+            const s = res.suggestions[Number(b.dataset.idPick)];
+            form.species.value = s.scientific;
+            if (!form.name.value) form.name.value = s.common || s.scientific;
+            results.innerHTML = "";
+            hint.textContent = `Filled from ${s.scientific}. Edit anything before saving.`;
+            file.value = "";
+            go.disabled = true;
+          }));
+        } catch (err) { hint.textContent = err.message; }
+        go.textContent = "Identify";
+        go.disabled = !file.files[0];
+      };
+    }
     if (isNew) {
       bindRm();
       $("#add-row", sheet).onclick = () => { $("#task-rows").insertAdjacentHTML("beforeend", taskRow({ kind: "fertilize", interval_days: 30 })); bindRm(); };
