@@ -24,6 +24,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, Response, Uploa
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -1107,7 +1108,8 @@ def sniff_image(data: bytes) -> str | None:
     return None
 
 
-async def save_photo(file: UploadFile) -> str:
+async def read_photo_upload(file: UploadFile) -> tuple[bytes, str]:
+    """Bytes and extension of an uploaded photo, with the same size and type checks everywhere."""
     chunks, total = [], 0
     while True:
         chunk = await file.read(UPLOAD_CHUNK)
@@ -1121,6 +1123,11 @@ async def save_photo(file: UploadFile) -> str:
     ext = sniff_image(data)
     if not ext:
         raise HTTPException(400, "Photos must be JPEG, PNG, WebP, GIF, or HEIC")
+    return data, ext
+
+
+async def save_photo(file: UploadFile) -> str:
+    data, ext = await read_photo_upload(file)
     name = secrets.token_hex(16) + ext
     (PHOTOS_DIR / name).write_bytes(data)
     return name
@@ -1249,6 +1256,82 @@ def get_photo(name: str, request: Request):
 def library(request: Request):
     current_user(request)
     return {"source": LIBRARY_SOURCE, "plants": LIBRARY}
+
+
+# ---------------------------------------------------------------- photo identification (Pl@ntNet)
+
+PLANTNET_URL = "https://my-api.plantnet.org/v2/identify/all"
+PLANTNET_TIMEOUT = 10
+PLANTNET_RESULTS = 5
+PLANTNET_MEDIA = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".heic": "image/heic"}
+
+
+def plantnet_key() -> str:
+    return os.getenv("PLANTS_PLANTNET_API_KEY", "").strip()
+
+
+@app.get("/api/identify")
+def identify_status(request: Request):
+    current_user(request)
+    return {"configured": bool(plantnet_key())}
+
+
+def plantnet_identify(data: bytes, ext: str, key: str) -> dict[str, Any]:
+    """Ask Pl@ntNet what a photo shows. Raises HTTPException with a plain reason on failure."""
+    boundary = "plants" + secrets.token_hex(12)
+    body = b"\r\n".join([
+        f"--{boundary}".encode(),
+        f'Content-Disposition: form-data; name="images"; filename="photo{ext}"'.encode(),
+        f"Content-Type: {PLANTNET_MEDIA.get(ext, 'image/jpeg')}".encode(),
+        b"",
+        data,
+        f"--{boundary}".encode(),
+        b'Content-Disposition: form-data; name="organs"',
+        b"",
+        b"auto",
+        f"--{boundary}--".encode(),
+        b"",
+    ])
+    req = urllib.request.Request(
+        f"{PLANTNET_URL}?api-key={urllib.parse.quote(key)}",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "plants-self-hosted/0.1"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=PLANTNET_TIMEOUT) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise HTTPException(502, "Pl@ntNet rejected the API key. Check PLANTS_PLANTNET_API_KEY.")
+        if e.code == 429:
+            raise HTTPException(429, "The Pl@ntNet daily identification limit was reached. The free plan resets each day.")
+        if e.code in (400, 404, 413, 415):
+            raise HTTPException(400, "Pl@ntNet couldn't read that photo. Try a sharp, close-up photo of leaves or flowers.")
+        raise HTTPException(503, "Pl@ntNet is having trouble right now. Try again later.")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        raise HTTPException(503, "Pl@ntNet didn't answer in time. Check the server can reach the internet, then try again.")
+
+
+@app.post("/api/identify")
+async def identify_photo(request: Request, photo: UploadFile = File(...)):
+    current_user(request)
+    key = plantnet_key()
+    if not key:
+        raise HTTPException(404, "Photo identification isn't set up on this server. Add PLANTS_PLANTNET_API_KEY to the compose file; see the readme.")
+    data, ext = await read_photo_upload(photo)
+    payload = await run_in_threadpool(plantnet_identify, data, ext, key)
+    suggestions = []
+    for result in payload.get("results", [])[:PLANTNET_RESULTS]:
+        species = result.get("species") or {}
+        scientific = species.get("scientificNameWithoutAuthor") or species.get("scientificName") or ""
+        if not scientific:
+            continue
+        suggestions.append({
+            "scientific": scientific,
+            "common": (species.get("commonNames") or [""])[0],
+            "score": round((result.get("score") or 0) * 100),
+        })
+    return {"suggestions": suggestions}
 
 
 # ---------------------------------------------------------------- weather (Open-Meteo)
