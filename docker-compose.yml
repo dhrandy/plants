@@ -12,5 +12,10 @@ services:
       - PLANTS_COOKIE_SECURE=${PLANTS_COOKIE_SECURE:-false}
       # IP of your reverse proxy, so login rate limits see real client addresses.
       - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      # Browser push. Generate a key pair once (see "Browser push" in the readme); leave empty to keep push off.
+      - PLANTS_VAPID_PUBLIC_KEY=${PLANTS_VAPID_PUBLIC_KEY:-}
+      - PLANTS_VAPID_PRIVATE_KEY=${PLANTS_VAPID_PRIVATE_KEY:-}
+      # Contact the push services can reach you at: mailto:you@example.com or your https:// address.
+      - PLANTS_VAPID_SUBJECT=${PLANTS_VAPID_SUBJECT:-}
     ports:
       - 8653:8000
