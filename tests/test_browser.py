@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import subprocess
 import time
 from datetime import date, timedelta
@@ -166,3 +168,89 @@ def test_push_toggle_and_service_worker_notification(push_url, tmp_path, width, 
         assert shown == [{"title": "Plants: 1 plant to check", "tag": "plants-due", "url": "/#/"}]
         assert not errors, errors
         ctx.close()
+
+
+@pytest.fixture(scope="module")
+def identify_url(tmp_path_factory):
+    proc, url = start_server(tmp_path_factory.mktemp("identify"), PORT + 2,
+                             {"PLANTS_PLANTNET_API_KEY": "test-key"})
+    yield url
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_identify_from_photo(identify_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+
+        def handle_identify(route):
+            if route.request.method == "POST":
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"suggestions": [
+                    {"scientific": "Monstera deliciosa", "common": "Swiss cheese plant", "score": 91},
+                    {"scientific": "Epipremnum aureum", "common": "Golden pothos", "score": 44},
+                ]}))
+            else:
+                route.fallback()
+
+        page.route("**/api/identify", handle_identify)
+        sign_in(page, identify_url)
+        # the add/edit form offers identification when the server has a key
+        page.get_by_role("link", name="Plants", exact=True).click()
+        page.get_by_role("button", name="Add plant").click()
+        page.locator("#lib option").nth(3).wait_for(state="attached")
+        expect(page.locator("#id-photo")).to_be_visible()
+        expect(page.get_by_role("button", name="Identify", exact=True)).to_be_disabled()
+        page.locator("#id-photo").set_input_files(
+            {"name": "plant.png", "mimeType": "image/png", "buffer": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64})
+        go = page.get_by_role("button", name="Identify", exact=True)
+        expect(go).to_be_enabled()
+        if width < 650:
+            assert go.bounding_box()["height"] >= 34
+        go.click()
+        page.get_by_role("button", name=re.compile("Swiss cheese plant")).click()
+        expect(page.locator("#f-species")).to_have_value("Monstera deliciosa")
+        expect(page.locator("#f-name")).to_have_value("Swiss cheese plant")
+        expect(page.locator("#id-hint")).to_contain_text("Filled from Monstera deliciosa")
+        # a name already typed in is kept
+        page.locator("#f-name").fill("Kitchen monstera")
+        page.locator("#id-photo").set_input_files(
+            {"name": "plant.png", "mimeType": "image/png", "buffer": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64})
+        page.get_by_role("button", name="Identify", exact=True).click()
+        page.get_by_role("button", name=re.compile("Golden pothos")).click()
+        expect(page.locator("#f-species")).to_have_value("Epipremnum aureum")
+        expect(page.locator("#f-name")).to_have_value("Kitchen monstera")
+        # an identification failure shows the reason in place
+        page.unroute("**/api/identify")
+        page.route("**/api/identify", lambda route: route.fulfill(
+            status=429, content_type="application/json",
+            body=json.dumps({"detail": "The Pl@ntNet daily identification limit was reached. The free plan resets each day."}))
+            if route.request.method == "POST" else route.fallback())
+        page.locator("#id-photo").set_input_files(
+            {"name": "plant.png", "mimeType": "image/png", "buffer": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64})
+        page.get_by_role("button", name="Identify", exact=True).click()
+        expect(page.locator("#id-hint")).to_contain_text("daily identification limit")
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        assert not errors, errors
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_identify_without_key_explains_itself(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        sign_in(page, app_url)
+        page.get_by_role("link", name="Plants", exact=True).click()
+        page.get_by_role("button", name="Add plant").click()
+        page.locator("#lib option").nth(3).wait_for(state="attached")
+        expect(page.locator("#id-photo")).to_have_count(0)
+        expect(page.locator("#id-hint")).to_contain_text("isn't set up on this server")
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        assert not errors, errors
+        browser.close()
