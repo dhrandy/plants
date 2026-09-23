@@ -28,6 +28,21 @@ def app_url(tmp_path_factory):
     proc.wait(timeout=5)
 
 
+def start_server(data_dir, port, extra=None):
+    env = {**os.environ, "PLANTS_DATA_DIR": str(data_dir), "PLANTS_NOTIFY_WORKER": "false",
+           "PLANTS_WEATHER_OFFLINE": "true", **(extra or {})}
+    proc = subprocess.Popen(["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)], env=env)
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(80):
+        try:
+            if httpx.get(url + "/api/status").status_code == 200:
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.1)
+    return proc, url
+
+
 def sign_in(page, url):
     page.goto(url)
     page.wait_for_load_state("networkidle")
@@ -86,8 +101,68 @@ def test_core_flow_and_layout(app_url, width, height):
         # settings renders, weather card handles offline
         page.get_by_role("link", name="Settings").click()
         expect(page.get_by_role("heading", name="Weather location")).to_be_visible()
+        # push section explains why it's off when the server has no VAPID keys
+        expect(page.get_by_role("heading", name="Push notifications")).to_be_visible()
+        expect(page.locator("#push-status")).to_contain_text("isn't set up on the server")
+        expect(page.locator("#push-on")).to_be_disabled()
         assert page.evaluate("document.documentElement.scrollWidth") <= width
         page.get_by_role("link", name="Today").click()
         expect(page.locator("#weather")).to_be_visible()
         assert not errors, errors
         browser.close()
+
+
+@pytest.fixture(scope="module")
+def push_url(tmp_path_factory):
+    from app import vapid
+
+    public, private = vapid.generate()
+    proc, url = start_server(tmp_path_factory.mktemp("push"), PORT + 1,
+                             {"PLANTS_VAPID_PUBLIC_KEY": public, "PLANTS_VAPID_PRIVATE_KEY": private})
+    yield url
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_push_toggle_and_service_worker_notification(push_url, tmp_path, width, height):
+    # Full Chromium in a persistent profile: the headless shell and incognito contexts have no push.
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(str(tmp_path / "profile"), channel="chromium",
+                                                   viewport={"width": width, "height": height})
+        ctx.grant_permissions(["notifications"], origin=push_url)
+        page = ctx.new_page()
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        sign_in(page, push_url)
+        page.get_by_role("link", name="Settings", exact=True).click()
+        expect(page.get_by_role("heading", name="Push notifications")).to_be_visible()
+        expect(page.locator("#push-status")).to_contain_text("Off for this device")
+        expect(page.locator("#push-on")).to_be_enabled()
+        toggle = page.locator("label.toggle", has=page.locator("#push-on")).bounding_box()
+        assert width > 650 or toggle["height"] >= 44
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        # the service worker turns a push message into a notification that points at Today
+        cdp = ctx.new_cdp_session(page)
+        regs = []
+        cdp.on("ServiceWorker.workerRegistrationUpdated", lambda e: regs.extend(e["registrations"]))
+        cdp.send("ServiceWorker.enable")
+        page.evaluate("navigator.serviceWorker.ready.then(() => true)")
+        for _ in range(50):
+            if regs:
+                break
+            page.wait_for_timeout(100)
+        reg_id = [r for r in regs if not r["isDeleted"]][0]["registrationId"]
+        cdp.send("ServiceWorker.deliverPushMessage", {
+            "origin": push_url, "registrationId": reg_id,
+            "data": '{"title":"Plants: 1 plant to check","body":"Water check: Fern - due today","tag":"plants-due","url":"/#/"}'})
+        shown = []
+        for _ in range(50):
+            shown = page.evaluate("navigator.serviceWorker.ready.then(r => r.getNotifications())"
+                                  ".then(ns => ns.map(n => ({title: n.title, tag: n.tag, url: n.data.url})))")
+            if shown:
+                break
+            page.wait_for_timeout(100)
+        assert shown == [{"title": "Plants: 1 plant to check", "tag": "plants-due", "url": "/#/"}]
+        assert not errors, errors
+        ctx.close()
