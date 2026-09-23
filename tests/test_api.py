@@ -1,4 +1,5 @@
 import os
+import urllib.error
 from datetime import date, timedelta
 
 os.environ["PLANTS_DATA_DIR"] = "/tmp/plants-pytest-data"
@@ -407,3 +408,73 @@ def test_push_payload_is_encrypted_and_vapid_signed(tmp_path, monkeypatch):
     jwt = headers["authorization"].split("t=")[1].split(",")[0]
     claims = _json.loads(base64.urlsafe_b64decode(jwt.split(".")[1] + "=="))
     assert claims["aud"] == "https://fcm.googleapis.com" and claims["sub"] == "mailto:admin@example.com"
+
+
+def test_identify_requires_key(tmp_path, monkeypatch):
+    fresh(tmp_path)
+    monkeypatch.delenv("PLANTS_PLANTNET_API_KEY", raising=False)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/identify").json() == {"configured": False}
+        r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
+        assert r.status_code == 404 and "PLANTS_PLANTNET_API_KEY" in r.json()["detail"]
+
+
+def test_identify_suggestions(tmp_path, monkeypatch):
+    fresh(tmp_path)
+    monkeypatch.setenv("PLANTS_PLANTNET_API_KEY", "test-key")
+    payload = {"results": [
+        {"score": 0.912, "species": {"scientificNameWithoutAuthor": "Monstera deliciosa",
+                                     "commonNames": ["Swiss cheese plant", "Split-leaf philodendron"]}},
+        {"score": 0.441, "species": {"scientificNameWithoutAuthor": "Epipremnum aureum",
+                                     "commonNames": ["Golden pothos"]}},
+        {"score": 0.201, "species": {"scientificName": "Fallback scientific name", "commonNames": []}},
+        {"score": 0.102, "species": {}},
+    ]}
+    seen = {}
+
+    def fake_identify(data, ext, key):
+        seen["ext"], seen["key"] = ext, key
+        return payload
+
+    monkeypatch.setattr(main, "plantnet_identify", fake_identify)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/identify").json() == {"configured": True}
+        r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
+        assert r.status_code == 200
+        sugg = r.json()["suggestions"]
+        assert sugg[0] == {"scientific": "Monstera deliciosa", "common": "Swiss cheese plant", "score": 91}
+        assert sugg[1] == {"scientific": "Epipremnum aureum", "common": "Golden pothos", "score": 44}
+        assert sugg[2] == {"scientific": "Fallback scientific name", "common": "", "score": 20}
+        assert len(sugg) == 3  # results without any scientific name are dropped
+        assert seen == {"ext": ".png", "key": "test-key"}
+        r = c.post("/api/identify", files={"photo": ("notes.txt", b"not an image", "text/plain")})
+        assert r.status_code == 400 and "JPEG" in r.json()["detail"]
+
+
+def test_identify_error_mapping(tmp_path, monkeypatch):
+    fresh(tmp_path)
+    monkeypatch.setenv("PLANTS_PLANTNET_API_KEY", "test-key")
+
+    def raise_http(code):
+        def fake(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, "err", {}, None)
+        return fake
+
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        monkeypatch.setattr(main.urllib.request, "urlopen", raise_http(429))
+        r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
+        assert r.status_code == 429 and "limit" in r.json()["detail"]
+        monkeypatch.setattr(main.urllib.request, "urlopen", raise_http(401))
+        r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
+        assert r.status_code == 502 and "API key" in r.json()["detail"]
+        monkeypatch.setattr(main.urllib.request, "urlopen", raise_http(400))
+        r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
+        assert r.status_code == 400 and "photo" in r.json()["detail"]
+        def fake_down(req, timeout=None):
+            raise urllib.error.URLError("no route")
+        monkeypatch.setattr(main.urllib.request, "urlopen", fake_down)
+        r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
+        assert r.status_code == 503 and "internet" in r.json()["detail"]
