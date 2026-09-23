@@ -274,6 +274,17 @@ def init_db() -> None:
           via TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          id INTEGER PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          endpoint TEXT NOT NULL UNIQUE,
+          p256dh TEXT NOT NULL,
+          auth TEXT NOT NULL,
+          user_agent TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          last_success_at TEXT,
+          last_error TEXT NOT NULL DEFAULT ''
+        );
         CREATE INDEX IF NOT EXISTS idx_tasks_plant ON tasks(plant_id);
         CREATE INDEX IF NOT EXISTS idx_events_plant ON events(plant_id, date);
         """
@@ -309,6 +320,9 @@ def seed_example(c) -> None:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    problem = vapid_problem()
+    if problem and problem != "not set":
+        print(f"browser push disabled: {problem}")
     if os.getenv("PLANTS_NOTIFY_WORKER", "true").lower() == "true":
         threading.Thread(target=notification_worker, daemon=True).start()
 
@@ -1717,9 +1731,9 @@ def in_quiet_hours(hour: int, start: int, end: int) -> bool:
     return hour >= start or hour < end
 
 
-def notification_items(c, now: datetime) -> list[dict[str, Any]]:
+def notification_items(c, now: datetime, state_key: str = "notify_state") -> list[dict[str, Any]]:
     """Due/overdue tasks that should be announced now, honoring the repeat setting."""
-    state = json.loads(get_setting(c, "notify_state", "{}") or "{}")
+    state = json.loads(get_setting(c, state_key, "{}") or "{}")
     try:
         repeat = int(get_setting(c, "overdue_repeat_days", NOTIFY_DEFAULTS["overdue_repeat_days"]))
     except ValueError:
@@ -1749,45 +1763,75 @@ def describe(item: dict[str, Any], base: str) -> str:
     return line
 
 
-def run_notification_check(now: datetime | None = None, force: bool = False) -> int:
-    """Send due-care alerts. Returns how many items were announced."""
-    now = now or datetime.now().astimezone()
-    with db() as c:
-        cfg = {k: get_setting(c, k, v) for k, v in NOTIFY_DEFAULTS.items()}
-        if not cfg["notify_urls"].strip():
-            return 0
-        hour = now.hour
-        if not force:
-            if in_quiet_hours(hour, int(cfg["quiet_start"]), int(cfg["quiet_end"])):
-                return 0
-            if hour < int(cfg["notify_hour"]):
-                return 0
-        items = notification_items(c, now)
-        if not items:
-            return 0
-        app_name = get_setting(c, "app_name", "Your Plants")
-        base = cfg["public_url"].strip()
-        footer = "Check the soil before watering."
-        if cfg["notify_mode"] == "each":
-            for item in items:
-                ok, detail = send_notification(
-                    cfg["notify_urls"], f"{app_name}: {item['plant_name']}", describe(item, base) + "\n" + footer
-                )
-                if not ok:
-                    raise RuntimeError(detail)
-        else:
-            body = "\n".join(describe(i, base) for i in items) + "\n\n" + footer
-            n = len(items)
-            ok, detail = send_notification(cfg["notify_urls"], f"{app_name}: {n} plant{'s' if n != 1 else ''} to check", body)
+def mark_announced(c, key: str, items: list[dict[str, Any]], now: datetime) -> None:
+    state = json.loads(get_setting(c, key, "{}") or "{}")
+    for item in items:
+        state[str(item["task_id"])] = {"due": item["next_due"], "sent": now.date().isoformat()}
+    live = {str(r[0]) for r in c.execute("SELECT id FROM tasks")}
+    state = {k: v for k, v in state.items() if k in live}
+    set_setting(c, key, json.dumps(state))
+
+
+def send_apprise_alerts(cfg: dict[str, str], items, app_name: str, base: str) -> None:
+    footer = "Check the soil before watering."
+    if cfg["notify_mode"] == "each":
+        for item in items:
+            ok, detail = send_notification(
+                cfg["notify_urls"], f"{app_name}: {item['plant_name']}", describe(item, base) + "\n" + footer
+            )
             if not ok:
                 raise RuntimeError(detail)
-        state = json.loads(get_setting(c, "notify_state", "{}") or "{}")
-        for item in items:
-            state[str(item["task_id"])] = {"due": item["next_due"], "sent": now.date().isoformat()}
-        live = {str(r[0]) for r in c.execute("SELECT id FROM tasks")}
-        state = {k: v for k, v in state.items() if k in live}
-        set_setting(c, "notify_state", json.dumps(state))
-        return len(items)
+    else:
+        body = "\n".join(describe(i, base) for i in items) + "\n\n" + footer
+        n = len(items)
+        ok, detail = send_notification(cfg["notify_urls"], f"{app_name}: {n} plant{'s' if n != 1 else ''} to check", body)
+        if not ok:
+            raise RuntimeError(detail)
+
+
+def run_notification_check(now: datetime | None = None, force: bool = False) -> int:
+    """Send due-care alerts through Apprise and browser push.
+
+    Both channels share the schedule (send-from hour, quiet hours, repeat) but keep their own
+    "already announced" state, so a failing Apprise URL never blocks push or the other way round.
+    Returns how many items were announced on the busiest channel.
+    """
+    now = now or datetime.now().astimezone()
+    errors: list[str] = []
+    counts = [0]
+    with db() as c:
+        cfg = {k: get_setting(c, k, v) for k, v in NOTIFY_DEFAULTS.items()}
+        want_apprise = bool(cfg["notify_urls"].strip())
+        want_push = push_configured() and c.execute(
+            "SELECT 1 FROM push_subscriptions s JOIN users u ON u.id=s.user_id WHERE u.active=1 LIMIT 1"
+        ).fetchone() is not None
+        if not want_apprise and not want_push:
+            return 0
+        if not force:
+            if in_quiet_hours(now.hour, int(cfg["quiet_start"]), int(cfg["quiet_end"])):
+                return 0
+            if now.hour < int(cfg["notify_hour"]):
+                return 0
+        app_name = get_setting(c, "app_name", "Your Plants")
+        base = cfg["public_url"].strip()
+        if want_apprise:
+            items = notification_items(c, now, "notify_state")
+            if items:
+                try:
+                    send_apprise_alerts(cfg, items, app_name, base)
+                    mark_announced(c, "notify_state", items, now)
+                    counts.append(len(items))
+                except Exception as exc:  # keep going so push still goes out
+                    errors.append(f"apprise: {exc}")
+        if want_push:
+            items = notification_items(c, now, "push_state")
+            if items:
+                send_push_alerts(c, cfg["notify_mode"], items, app_name)
+                mark_announced(c, "push_state", items, now)
+                counts.append(len(items))
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    return max(counts)
 
 
 def notification_worker() -> None:
@@ -1859,11 +1903,273 @@ def test_notification(request: Request):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- browser push (Web Push + VAPID)
+
+PUSH_TTL_SECONDS = 24 * 60 * 60
+PUSH_MAX_PER_USER = 20
+# Push services used by current browsers. The server only ever POSTs to these, so a signed-in user
+# can't point it at an arbitrary host. Add more with PLANTS_PUSH_HOSTS (comma-separated suffixes).
+PUSH_HOST_SUFFIXES = (
+    "fcm.googleapis.com",  # Chrome, Edge on Android, Brave, Opera, Samsung Internet
+    "google.com",  # Chromium builds without Google API keys (jmt17.google.com)
+    "push.services.mozilla.com",  # Firefox
+    "push.apple.com",  # Safari on macOS and iOS/iPadOS home-screen apps
+    "notify.windows.com",  # Edge on Windows
+)
+B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+
+
+def vapid_keys() -> tuple[str, str]:
+    return (os.getenv("PLANTS_VAPID_PUBLIC_KEY", "").strip(), os.getenv("PLANTS_VAPID_PRIVATE_KEY", "").strip())
+
+
+_vapid_checked: dict[tuple[str, str], str] = {}
+
+
+def vapid_problem() -> str:
+    """Empty when the VAPID key pair is set and valid; otherwise a short reason."""
+    public, private = vapid_keys()
+    if not public or not private:
+        return "not set"
+    if (public, private) not in _vapid_checked:
+        _vapid_checked[(public, private)] = check_vapid_pair(public, private)
+    return _vapid_checked[(public, private)]
+
+
+def check_vapid_pair(public: str, private: str) -> str:
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from py_vapid import Vapid
+
+        key = Vapid.from_string(private)
+        raw = key.public_key.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        derived = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    except Exception:
+        return "PLANTS_VAPID_PRIVATE_KEY is not a valid key"
+    if derived != public.rstrip("="):
+        return "PLANTS_VAPID_PUBLIC_KEY doesn't match the private key"
+    return ""
+
+
+def push_configured() -> bool:
+    return vapid_problem() == ""
+
+
+def vapid_subject(c=None) -> str:
+    subject = os.getenv("PLANTS_VAPID_SUBJECT", "").strip()
+    if subject:
+        return subject
+    base = get_setting(c, "public_url", "").strip() if c is not None else ""
+    if base.startswith("https://"):
+        return base
+    return "mailto:admin@example.com"
+
+
+def push_hosts() -> tuple[str, ...]:
+    extra = tuple(h.strip().lower().lstrip(".") for h in os.getenv("PLANTS_PUSH_HOSTS", "").split(",") if h.strip())
+    return PUSH_HOST_SUFFIXES + extra
+
+
+def push_endpoint_allowed(endpoint: str) -> bool:
+    try:
+        url = urllib.parse.urlsplit(endpoint)
+    except ValueError:
+        return False
+    host = (url.hostname or "").lower()
+    if url.scheme != "https" or not host or url.username or url.password:
+        return False
+    return any(host == h or host.endswith("." + h) for h in push_hosts())
+
+
+def webpush_send(sub: dict[str, Any], payload: str, subject: str) -> None:
+    """Deliver one push message. Raises PushGone when the subscription no longer exists."""
+    from pywebpush import WebPushException, webpush
+
+    try:
+        webpush(
+            subscription_info=sub,
+            data=payload,
+            vapid_private_key=vapid_keys()[1],
+            vapid_claims={"sub": subject},  # fresh dict: pywebpush writes the per-endpoint "aud" into it
+            ttl=PUSH_TTL_SECONDS,
+            timeout=10,
+        )
+    except WebPushException as exc:
+        status = getattr(exc.response, "status_code", None)
+        if status in (404, 410):
+            raise PushGone(str(status)) from exc
+        raise RuntimeError(f"push service returned {status or 'an error'}") from exc
+
+
+class PushGone(Exception):
+    """The browser unsubscribed or the subscription expired."""
+
+
+def push_to_rows(c, rows, message: dict[str, Any]) -> dict[str, int]:
+    """Send one message to each subscription row. Expired ones are deleted; errors are recorded."""
+    payload = json.dumps(message)
+    subject = vapid_subject(c)
+    result = {"sent": 0, "removed": 0, "failed": 0}
+    for row in rows:
+        sub = {"endpoint": row["endpoint"], "keys": {"p256dh": row["p256dh"], "auth": row["auth"]}}
+        try:
+            webpush_send(sub, payload, subject)
+        except PushGone:
+            c.execute("DELETE FROM push_subscriptions WHERE id=?", (row["id"],))
+            result["removed"] += 1
+        except Exception as exc:
+            c.execute("UPDATE push_subscriptions SET last_error=? WHERE id=?", (str(exc)[:200], row["id"]))
+            print(f"push delivery failed: {exc}")
+            result["failed"] += 1
+        else:
+            c.execute("UPDATE push_subscriptions SET last_success_at=?, last_error='' WHERE id=?", (now_iso(), row["id"]))
+            result["sent"] += 1
+    return result
+
+
+def push_line(item: dict[str, Any]) -> str:
+    when = f"overdue {-item['days']} day{'s' if item['days'] != -1 else ''}" if item["days"] < 0 else "due today"
+    where = f" ({item['room']})" if item["room"] else ""
+    return f"{item['label']} check: {item['plant_name']}{where} - {when}"
+
+
+def push_messages(mode: str, items: list[dict[str, Any]], app_name: str) -> list[dict[str, Any]]:
+    if mode == "each":
+        return [
+            {"title": f"{app_name}: {i['plant_name']}", "body": push_line(i) + "\nCheck the soil before watering.",
+             "tag": f"plants-task-{i['task_id']}", "url": "/#/"}
+            for i in items
+        ]
+    n = len(items)
+    lines = [push_line(i) for i in items[:6]]
+    if n > 6:
+        lines.append(f"and {n - 6} more")
+    return [{"title": f"{app_name}: {n} plant{'s' if n != 1 else ''} to check", "body": "\n".join(lines),
+             "tag": "plants-due", "url": "/#/"}]
+
+
+def send_push_alerts(c, mode: str, items: list[dict[str, Any]], app_name: str) -> dict[str, int]:
+    total = {"sent": 0, "removed": 0, "failed": 0}
+    for message in push_messages(mode, items, app_name):
+        rows = c.execute(
+            "SELECT s.* FROM push_subscriptions s JOIN users u ON u.id=s.user_id WHERE u.active=1"
+        ).fetchall()
+        for k, v in push_to_rows(c, rows, message).items():
+            total[k] += v
+    return total
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=20, max_length=200)
+    auth: str = Field(min_length=8, max_length=100)
+
+    @field_validator("p256dh", "auth")
+    @classmethod
+    def _b64(cls, v):
+        if not B64URL_RE.fullmatch(v):
+            raise ValueError("Push keys must be base64url")
+        return v
+
+
+class PushSubscriptionIn(BaseModel):
+    endpoint: str = Field(min_length=10, max_length=1000)
+    keys: PushKeys
+
+
+class PushEndpointIn(BaseModel):
+    endpoint: str = Field(min_length=10, max_length=1000)
+
+
+def push_status(c, user_id: int, endpoint: str = "") -> dict[str, Any]:
+    devices = c.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?", (user_id,)).fetchone()[0]
+    this = None
+    if endpoint:
+        this = c.execute(
+            "SELECT last_success_at, last_error FROM push_subscriptions WHERE user_id=? AND endpoint=?",
+            (user_id, endpoint),
+        ).fetchone()
+    return {
+        "configured": push_configured(),
+        "problem": "" if push_configured() or vapid_problem() == "not set" else vapid_problem(),
+        "public_key": vapid_keys()[0] if push_configured() else "",
+        "devices": devices,
+        "subscribed": this is not None,
+        "last_error": this["last_error"] if this else "",
+    }
+
+
+@app.get("/api/push")
+def get_push(request: Request, endpoint: str = ""):
+    user = current_user(request)
+    with db() as c:
+        return push_status(c, user["id"], endpoint[:1000])
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(body: PushSubscriptionIn, request: Request):
+    user = current_user(request)
+    if not push_configured():
+        raise HTTPException(503, "Push isn't set up on the server yet. An administrator needs to add VAPID keys.")
+    if not push_endpoint_allowed(body.endpoint):
+        raise HTTPException(400, "That push service isn't on the allowed list (see PLANTS_PUSH_HOSTS in the readme)")
+    agent = request.headers.get("user-agent", "")[:200]
+    with db() as c:
+        existing = c.execute("SELECT id FROM push_subscriptions WHERE endpoint=?", (body.endpoint,)).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE push_subscriptions SET user_id=?, p256dh=?, auth=?, user_agent=?, last_error='' WHERE id=?",
+                (user["id"], body.keys.p256dh, body.keys.auth, agent, existing["id"]),
+            )
+        else:
+            count = c.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?", (user["id"],)).fetchone()[0]
+            if count >= PUSH_MAX_PER_USER:
+                c.execute(
+                    "DELETE FROM push_subscriptions WHERE id IN (SELECT id FROM push_subscriptions WHERE user_id=? "
+                    "ORDER BY COALESCE(last_success_at, created_at) LIMIT ?)",
+                    (user["id"], count - PUSH_MAX_PER_USER + 1),
+                )
+            c.execute(
+                "INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth,user_agent,created_at) VALUES(?,?,?,?,?,?)",
+                (user["id"], body.endpoint, body.keys.p256dh, body.keys.auth, agent, now_iso()),
+            )
+        return push_status(c, user["id"], body.endpoint)
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(body: PushEndpointIn, request: Request):
+    user = current_user(request)
+    with db() as c:
+        c.execute("DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?", (user["id"], body.endpoint))
+        return push_status(c, user["id"])
+
+
+@app.post("/api/push/test")
+def push_test(body: PushEndpointIn, request: Request):
+    user = current_user(request)
+    if not push_configured():
+        raise HTTPException(503, "Push isn't set up on the server yet")
+    with db() as c:
+        rows = c.execute(
+            "SELECT * FROM push_subscriptions WHERE user_id=? AND endpoint=?", (user["id"], body.endpoint)
+        ).fetchall()
+        if not rows:
+            raise HTTPException(404, "This device isn't subscribed. Turn push on first.")
+        name = get_setting(c, "app_name", "Your Plants")
+        result = push_to_rows(c, rows, {"title": f"{name}: test notification",
+                                        "body": "Push is working. Care reminders will show up here.",
+                                        "tag": "plants-test", "url": "/#/"})
+    if result["removed"]:
+        raise HTTPException(410, "This browser's subscription has expired. Turn push off and on again.")
+    if result["failed"]:
+        raise HTTPException(502, "The push service didn't accept the message. Check the server's VAPID keys.")
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- backup
 
 
 BACKUP_TABLES = ("settings", "users", "api_tokens", "rooms", "plants", "tasks", "events")
-BACKUP_DELETE_ORDER = ("events", "tasks", "plants", "rooms", "api_tokens", "sessions", "users", "settings")
+BACKUP_DELETE_ORDER = ("push_subscriptions", "events", "tasks", "plants", "rooms", "api_tokens", "sessions", "users", "settings")
 
 
 @app.get("/api/export")
@@ -1871,7 +2177,7 @@ def export_data(request: Request):
     current_user(request, True)
     with db() as c:
         tables = {t: [dict(r) for r in c.execute(f"SELECT * FROM {t}")] for t in BACKUP_TABLES}
-    tables["settings"] = [r for r in tables["settings"] if r["key"] != "notify_state"]
+    tables["settings"] = [r for r in tables["settings"] if r["key"] not in ("notify_state", "push_state")]
     names = {r["photo"] for r in tables["plants"] if r["photo"]} | {r["photo"] for r in tables["events"] if r["photo"]}
     files = {}
     for name in names:
