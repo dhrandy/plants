@@ -36,6 +36,8 @@ Plants is a simple household plant care log with reminders. It shows what needs 
          - PLANTS_VAPID_PRIVATE_KEY=${PLANTS_VAPID_PRIVATE_KEY:-}
          # Contact the push services can reach you at: mailto:you@example.com or your https:// address.
          - PLANTS_VAPID_SUBJECT=${PLANTS_VAPID_SUBJECT:-}
+         # Photo identification with Pl@ntNet. Get a free key at https://my.plantnet.org/ (see "Photo identification" in the readme); leave empty to keep it off.
+         - PLANTS_PLANTNET_API_KEY=${PLANTS_PLANTNET_API_KEY:-}
        ports:
          - 8653:8000
    ```
@@ -64,6 +66,7 @@ Any tool that accepts a compose file works: paste the compose block above into a
 - **Care tasks**: watering, fertilizing, misting, repotting, or custom, each with its own check interval and optional winter interval. Duplicate a plant to copy its setup.
 - **Starter library**: twelve common houseplants that pre-fill species, light, care notes, and conservative starting intervals, each linked to its NC State Extension Plant Toolbox page. Everything stays editable; intervals mean "check the soil", not "water now".
 - **Photo timeline**: every care entry and photo lands on the plant's timeline with who logged it, so it doubles as a growth history. Pick any timeline photo as the main photo.
+- **Photo identification**: when adding or editing a plant, identify it from a photo through [Pl@ntNet](https://plantnet.org/) and fill the name and species from the top suggestions. Needs one free API key; see [Photo identification](#photo-identification).
 - **Seasons**: choose your winter months and a winter stretch (x1.25, x1.5, x2), or set a winter interval on a specific task. Nothing changes a schedule behind your back.
 - **Weather**: current conditions and a 5-day forecast (temperature, humidity, rain chance and amount) for a location you pick, with plain hints like "Rain likely tomorrow; outdoor pots may not need water". Weather never changes schedules.
 - **Notifications**: daily digest or one alert per plant through [Apprise](https://github.com/caronc/apprise), with quiet hours, a send-from hour, repeat reminders for overdue plants, and links back to the plant.
@@ -142,6 +145,22 @@ Things to know:
 - Disabled users get no push.
 - The server only sends to the known push services (Google, Mozilla, Apple, Microsoft). If a browser uses a different one, add its host with `PLANTS_PUSH_HOSTS`.
 
+## Photo identification
+
+Plants can guess what a plant is from a photo when you add or edit it. Pick a photo, tap **Identify**, and the top suggestions show up with common names, scientific names, and confidence. Picking one fills the species (and the name, if it's still empty) - you can edit everything before saving.
+
+Identification runs on your server, which calls the [Pl@ntNet API](https://my.plantnet.org/doc). The photo is sent to Pl@ntNet only to identify it; Plants never saves it. Pl@ntNet is free for personal use (500 identifications a day), and the app credits Pl@ntNet next to the button as its terms ask.
+
+**1. Get a free API key.** Create an account at [my.plantnet.org](https://my.plantnet.org/), confirm the email, then open your account page and copy the API key shown there.
+
+**2. Add it to the compose file** (or your Docker manager's environment settings), then redeploy:
+
+```yaml
+      - PLANTS_PLANTNET_API_KEY=your-key-here
+```
+
+Without a key, the add/edit plant form shows a short note that identification isn't set up, and nothing else changes.
+
 ## API tokens
 
 Create a token in **Settings → API tokens** (the token is shown once). Send it as `Authorization: Bearer <token>`. Interactive docs are at `/api/docs`.
@@ -198,6 +217,7 @@ Built in: passwords hashed with PBKDF2, HttpOnly SameSite=Strict session cookies
 | `PLANTS_DATA_DIR` | `/app/data` | Where the database and photos live |
 | `PLANTS_NOTIFY_WORKER` | `true` | Set `false` to turn off the notification checker (Apprise and push) |
 | `PLANTS_VAPID_PUBLIC_KEY` | empty | Browser push public key; see [Browser push](#browser-push) |
+| `PLANTS_PLANTNET_API_KEY` | empty | Pl@ntNet key for photo identification; see [Photo identification](#photo-identification) |
 | `PLANTS_VAPID_PRIVATE_KEY` | empty | Browser push private key; keep it secret |
 | `PLANTS_VAPID_SUBJECT` | App address or placeholder | `mailto:` or `https://` contact sent to push services |
 | `PLANTS_PUSH_HOSTS` | empty | Extra push service hosts to allow, comma-separated |
