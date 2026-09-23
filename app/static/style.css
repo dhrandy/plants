@@ -5,8 +5,10 @@
   --line: #2b3545;
   --text: #f1f5f9;
   --muted: #93a4b8;
-  --accent: #3fb950;
-  --accent2: #238636;
+  --accent: #588157;
+  --accent2: #567e55;
+  --accent2-hover: #4c6f4b;
+  --accent2-active: #436342;
   --link: #58a6ff;
   --warn: #d29922;
   --bad: #f85149;
@@ -16,7 +18,7 @@
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
-  background: radial-gradient(circle at 80% -10%, #16301f 0, transparent 30%), var(--bg);
+  background: radial-gradient(circle at 80% -10%, #1c2a1c 0, transparent 30%), var(--bg);
   color: var(--text);
   font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
   min-height: 100vh;
@@ -52,6 +54,8 @@ button, .btn {
 button:hover { border-color: #3d4a5e; }
 button:disabled { opacity: 0.5; cursor: default; }
 .primary { background: var(--accent2); border-color: var(--accent2); color: #fff; font-weight: 600; }
+.primary:hover { background: var(--accent2-hover); border-color: var(--accent2-hover); }
+.primary:active { background: var(--accent2-active); border-color: var(--accent2-active); }
 .danger { color: var(--bad); }
 .small { padding: 6px 12px; min-height: 34px; font-size: 14px; }
 .ghost { background: transparent; }
