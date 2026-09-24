@@ -29,8 +29,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=v0.1.0
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=A simple self-hosted household plant care log with reminders. Multi-user, one Docker container, SQLite storage - no subscriptions, no cloud account.
       - uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/dhrandy/plants:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
