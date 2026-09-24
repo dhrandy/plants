@@ -14,6 +14,8 @@ Plants is a simple household plant care log with reminders. It shows what needs 
    docker run -d --name plants -p 8653:8000 -v ./data:/app/data -e TZ=America/Chicago ghcr.io/dhrandy/plants:latest
    ```
 
+   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.1.0`.
+
    Or with Docker Compose. Save this as `docker-compose.yml` (the repo includes the same file):
 
    ```yaml
