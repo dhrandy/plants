@@ -197,7 +197,7 @@ def test_notifications_digest_repeat_and_quiet_hours(tmp_path, monkeypatch):
     assert main.run_notification_check(at(7)) == 0  # before send hour
     assert main.run_notification_check(at(9)) == 2  # example pothos + fern
     assert "check soil" in sent[0][1].lower() or "Check the soil" in sent[0][1]
-    assert "https://plants.example.com/#/plant/" in sent[0][1]
+    assert "Watered? Tap: https://plants.example.com/q/" in sent[0][1]  # one-tap link, no API token in it
     assert main.run_notification_check(at(10)) == 0  # already sent
     assert main.run_notification_check(at(9, 2)) >= 1  # overdue repeat
 
@@ -444,9 +444,13 @@ def test_identify_suggestions(tmp_path, monkeypatch):
         r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
         assert r.status_code == 200
         sugg = r.json()["suggestions"]
-        assert sugg[0] == {"scientific": "Monstera deliciosa", "common": "Swiss cheese plant", "score": 91}
-        assert sugg[1] == {"scientific": "Epipremnum aureum", "common": "Golden pothos", "score": 44}
-        assert sugg[2] == {"scientific": "Fallback scientific name", "common": "", "score": 20}
+        top = {k: sugg[0][k] for k in ("scientific", "common", "score")}
+        assert top == {"scientific": "Monstera deliciosa", "common": "Swiss cheese plant", "score": 91}
+        assert sugg[0]["care"]["match"] == "species" and sugg[0]["care"]["water_days"] == 7
+        assert sugg[2]["care"] is None  # nothing sensible to suggest for an unknown name
+        pick = lambda s: {k: s[k] for k in ("scientific", "common", "score")}  # noqa: E731
+        assert pick(sugg[1]) == {"scientific": "Epipremnum aureum", "common": "Golden pothos", "score": 44}
+        assert pick(sugg[2]) == {"scientific": "Fallback scientific name", "common": "", "score": 20}
         assert len(sugg) == 3  # results without any scientific name are dropped
         assert seen == {"ext": ".png", "key": "test-key"}
         r = c.post("/api/identify", files={"photo": ("notes.txt", b"not an image", "text/plain")})
@@ -478,3 +482,102 @@ def test_identify_error_mapping(tmp_path, monkeypatch):
         monkeypatch.setattr(main.urllib.request, "urlopen", fake_down)
         r = c.post("/api/identify", files={"photo": ("plant.png", PNG, "image/png")})
         assert r.status_code == 503 and "internet" in r.json()["detail"]
+
+
+def test_rotate_task_kind_and_plant_snooze(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        pid = c.get("/api/plants").json()[0]["id"]
+        r = c.post(f"/api/plants/{pid}/tasks", json={"kind": "rotate", "interval_days": 7})
+        assert r.status_code == 201
+        kinds = {t["kind"]: t for t in r.json()["tasks"]}
+        assert kinds["rotate"]["label"] == "Rotate" and kinds["rotate"]["state"] == "today"
+        assert {i["kind"] for i in c.get("/api/due?days=0").json()["items"]} == {"water", "rotate"}
+        r = c.post(f"/api/plants/{pid}/snooze", json={"days": 3})
+        assert r.status_code == 200 and r.json()["count"] == 2
+        assert all(t["snoozed"] and t["days"] == 3 for t in r.json()["plant"]["tasks"])
+        assert c.get("/api/due?days=0").json()["items"] == []
+        # Nothing left due, so a second plant snooze says so instead of stretching the snooze.
+        assert c.post(f"/api/plants/{pid}/snooze", json={"days": 3}).status_code == 400
+        tid = r.json()["plant"]["tasks"][0]["id"]
+        back = {t["id"]: t for t in c.post(f"/api/tasks/{tid}/unsnooze").json()["tasks"]}
+        assert back[tid]["snoozed"] is False and back[tid]["state"] == "today"
+        assert c.post(f"/api/plants/{pid}/snooze", json={"days": 0}).status_code == 422
+
+
+def test_quick_links_log_without_auth_and_stay_scoped(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        c.put("/api/notifications", json={"public_url": "https://plants.example.com"})
+        pid = c.get("/api/plants").json()[0]["id"]
+        c.post(f"/api/plants/{pid}/tasks", json={"kind": "mist", "interval_days": 3})
+        item = next(i for i in c.get("/api/due").json()["items"] if i["kind"] == "water")
+        links = item["quick_links"]
+        assert links["done"].startswith("https://plants.example.com/q/")
+        api_token = c.post("/api/tokens", json={"name": "Digest"}).json()["token"]
+        assert api_token not in str(links)
+        path = links["done"].removeprefix("https://plants.example.com")
+    anon = TestClient(main.app)
+    # Opening the link (what a chat app's link preview does) changes nothing.
+    r = anon.get(path)
+    assert r.status_code == 200 and "Mark watered" in r.text and "noindex" in r.headers["x-robots-tag"]
+    assert "script-src 'self'" in r.headers["content-security-policy"]
+    with TestClient(main.app) as c:
+        c.post("/api/login", json={"username": "admin-test", "password": "password-123"})
+        assert c.get(f"/api/plants/{pid}/events").json() == []
+    r = anon.post(path, data={"a": "done"})
+    assert r.status_code == 200 and "Logged: watered today" in r.text
+    assert "Already watered today" in anon.post(path, data={"a": "done"}).text
+    with TestClient(main.app) as c:
+        c.post("/api/login", json={"username": "admin-test", "password": "password-123"})
+        events = c.get(f"/api/plants/{pid}/events").json()
+        assert [(e["kind"], e["action"], e["via"]) for e in events] == [("water", "done", "Quick link")]
+        tasks = {t["kind"]: t for t in c.get(f"/api/plants/{pid}").json()["tasks"]}
+        assert tasks["water"]["last_done"] == date.today().isoformat()
+        assert tasks["mist"]["last_done"] is None  # a link only ever touches its own task
+        # Snooze through a link, then turn the feature off and reset links.
+        r = anon.post(tasks["mist"]["quick_links"]["snooze_3"].split("?")[0], data={"a": "snooze", "days": "3"})
+        assert "snoozed 3 days" in r.text
+        assert c.put("/api/settings", json={"feature_quick_links": False}).json()["feature_quick_links"] is False
+        assert anon.get(path).status_code == 404 and anon.post(path, data={"a": "done"}).status_code == 404
+        assert "quick_links" not in c.get(f"/api/plants/{pid}").json()["tasks"][0]
+        c.put("/api/settings", json={"feature_quick_links": True})
+        assert c.post("/api/quick-links/reset").json()["reset"] >= 2
+        assert anon.get(path).status_code == 404
+        new = c.get(f"/api/plants/{pid}").json()["tasks"][0]["quick_links"]["done"]
+        assert new != links["done"]
+
+
+def test_quick_link_guessing_is_rate_limited(tmp_path):
+    fresh(tmp_path)
+    main._quick_failures.clear()
+    with TestClient(main.app) as c:
+        setup_admin(c)
+    anon = TestClient(main.app)
+    for i in range(20):
+        assert anon.get(f"/q/guess{i:02d}guessguessguess").status_code == 404
+    r = anon.get("/q/guess99guessguessguess")
+    assert r.status_code == 429 and "retry-after" in r.headers
+    main._quick_failures.clear()
+
+
+def test_feature_toggles_and_care_suggestions(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        s = c.get("/api/settings").json()
+        assert s["feature_growth_timeline"] and s["feature_quick_links"] and s["feature_care_suggestions"]
+        s = c.put("/api/settings", json={"feature_growth_timeline": False}).json()
+        assert s["feature_growth_timeline"] is False and s["feature_quick_links"] is True
+        care = c.get("/api/care-suggestion", params={"species": "Sansevieria trifasciata"}).json()["care"]
+        assert care["library_key"] == "snake-plant" and care["water_days"] == 14
+        care = c.get("/api/care-suggestion", params={"species": "Anthurium andraeanum", "family": "Araceae"}).json()["care"]
+        assert care["match"] == "group" and care["water_days"] == 7 and care["fertilize_days"] == 30
+        assert c.get("/api/care-suggestion", params={"species": "Quercus robur", "family": "Fagaceae"}).json()["care"] is None
+        c.post("/api/users", json={"username": "member-test", "password": "password-123"})
+    with TestClient(main.app) as m:
+        m.post("/api/login", json={"username": "member-test", "password": "password-123"})
+        assert m.put("/api/settings", json={"feature_quick_links": False}).status_code == 403
+        assert m.post("/api/quick-links/reset").status_code == 403
