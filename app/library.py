@@ -132,3 +132,86 @@ LIBRARY = [
         "source": "https://plants.ces.ncsu.edu/plants/crassula-ovata/",
     },
 ]
+
+
+# Plant groups for species that aren't in the starter library. These are broad,
+# conservative starting points for checking the soil, keyed by genus or family
+# as Pl@ntNet reports them. They're a head start, not a rule; every value stays
+# editable and nothing changes a schedule after the plant is added.
+SYNONYMS = {
+    "sansevieria trifasciata": "dracaena trifasciata",
+    "sansevieria": "dracaena",
+    "spathiphyllum wallisii": "spathiphyllum",
+}
+
+GROUPS = [
+    # (match on, names, label, water, fertilize, mist)
+    ("family", {"cactaceae"}, "cacti", 21, 90, None),
+    ("family", {"crassulaceae"}, "succulents (stonecrop family)", 14, 90, None),
+    ("genus", {"aloe", "haworthia", "haworthiopsis", "gasteria"}, "aloes and relatives", 14, 90, None),
+    ("genus", {"dracaena", "sansevieria", "zamioculcas"}, "dracaenas and snake plants", 14, 60, None),
+    ("genus", {"ficus"}, "figs", 7, 30, None),
+    ("genus", {"peperomia"}, "peperomias", 10, 30, None),
+    ("genus", {"hoya"}, "hoyas", 10, 30, None),
+    ("family", {"marantaceae"}, "prayer plants and calatheas", 5, 30, 5),
+    ("family", {"orchidaceae"}, "orchids", 7, 30, None),
+    ("family", {"bromeliaceae"}, "bromeliads", 7, 60, None),
+    ("family", {"begoniaceae"}, "begonias", 5, 30, None),
+    ("family", {"araceae"}, "aroids (philodendron, anthurium and relatives)", 7, 30, None),
+    ("family", {"nephrolepidaceae", "pteridaceae", "aspleniaceae", "polypodiaceae", "davalliaceae", "dryopteridaceae"},
+     "ferns", 4, 30, 3),
+    ("family", {"commelinaceae"}, "spiderworts (tradescantia)", 7, 30, None),
+]
+
+
+def _norm(value: str) -> str:
+    value = " ".join((value or "").lower().split())
+    return SYNONYMS.get(value, value)
+
+
+def care_suggestion(species: str, genus: str = "", family: str = "") -> dict | None:
+    """Suggested starting care for a species name, or None when there's nothing sensible to say.
+
+    Order: exact starter-library species, then a library plant of the same genus,
+    then a broad plant group by genus or family.
+    """
+    sp = _norm(species)
+    gen = _norm(genus) or (sp.split(" ")[0] if sp else "")
+    fam = _norm(family)
+    if not sp and not gen and not fam:
+        return None
+
+    def from_library(entry, match):
+        return {
+            "match": match,
+            "basis": f"{entry['name']} in the starter library",
+            "library_key": entry["key"],
+            "water_days": entry["water_days"],
+            "fertilize_days": entry.get("fertilize_days"),
+            "mist_days": entry.get("mist_days"),
+            "light": entry["light"],
+            "care": entry["care"],
+            "source": entry["source"],
+        }
+
+    for entry in LIBRARY:
+        if sp and _norm(entry["species"]) == sp:
+            return from_library(entry, "species")
+    for entry in LIBRARY:
+        if gen and _norm(entry["species"]).split(" ")[0] == gen:
+            return from_library(entry, "genus")
+    for field, names, label, water, fert, mist in GROUPS:
+        value = gen if field == "genus" else fam
+        if value and value in names:
+            return {
+                "match": "group",
+                "basis": f"general guide for {label}",
+                "library_key": None,
+                "water_days": water,
+                "fertilize_days": fert,
+                "mist_days": mist,
+                "light": "",
+                "care": "",
+                "source": "",
+            }
+    return None
