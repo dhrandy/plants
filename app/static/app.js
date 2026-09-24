@@ -5,8 +5,11 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
-const KIND_ICON = { water: "💧", fertilize: "🧪", mist: "🌫️", repot: "🪴", custom: "✅" };
-const KINDS = [["water", "Water"], ["fertilize", "Fertilize"], ["mist", "Mist"], ["repot", "Repot"], ["custom", "Custom"]];
+const KIND_ICON = { water: "💧", fertilize: "🧪", mist: "🌫️", repot: "🪴", rotate: "🔄", custom: "✅" };
+const KINDS = [["water", "Water"], ["fertilize", "Fertilize"], ["mist", "Mist"], ["repot", "Repot"], ["rotate", "Rotate"], ["custom", "Custom"]];
+// Starting intervals when a task type is picked; always editable.
+const KIND_DAYS = { water: 7, fertilize: 30, mist: 3, repot: 365, rotate: 7, custom: 14 };
+const feature = (name) => !state.settings || state.settings[`feature_${name}`] !== false;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const state = { me: null, settings: null, roomFilter: "all", selected: new Set(), search: "", plantRoom: "all" };
@@ -209,7 +212,7 @@ function dueRow(i) {
     </div>
     <div class="due-actions">
       <button class="primary" data-act="done" data-id="${i.task_id}">Done</button>
-      <button data-act="snooze" data-id="${i.task_id}">Snooze</button>
+      <button data-act="snooze" data-id="${i.task_id}" data-plant="${i.plant_id}" data-plantdue="${i.plant_due || 0}" data-name="${esc(i.plant_name)}">Snooze</button>
       <button data-act="skip" data-id="${i.task_id}" title="Checked it, doesn't need it yet">Skip</button>
     </div>
   </div>`;
@@ -222,6 +225,9 @@ async function renderToday() {
   ]);
   const rooms = [...new Set(due.items.map((i) => i.room || "No room"))].sort();
   if (state.roomFilter !== "all" && !rooms.includes(state.roomFilter)) state.roomFilter = "all";
+  const dueByPlant = {};
+  due.items.forEach((i) => { if (i.days <= 0) dueByPlant[i.plant_id] = (dueByPlant[i.plant_id] || 0) + 1; });
+  due.items.forEach((i) => (i.plant_due = dueByPlant[i.plant_id] || 0));
   const items = due.items.filter((i) => state.roomFilter === "all" || (i.room || "No room") === state.roomFilter);
   const visible = new Set(items.map((i) => i.task_id));
   state.selected = new Set([...state.selected].filter((id) => visible.has(id)));
@@ -296,7 +302,12 @@ function bindCareButtons(root, after) {
     e.preventDefault();
     const id = Number(b.dataset.id);
     const act = b.dataset.act;
-    if (act === "snooze") return snoozeMenu((days) => care(id, "snooze", { days }, after));
+    if (act === "snooze") {
+      const whole = Number(b.dataset.plantdue) > 1 ? { plant: Number(b.dataset.plant), name: b.dataset.name, count: Number(b.dataset.plantdue) } : null;
+      return snoozeMenu((days, all) => (all ? snoozePlant(whole.plant, days, after) : care(id, "snooze", { days }, after)), whole);
+    }
+    if (act === "unsnooze") return unsnooze(id, after);
+    if (act === "copylink") return copyQuickLink(b.dataset.link);
     if (act === "log") return logCareModal(id, after);
     care(id, act, {}, after);
   }));
@@ -310,16 +321,45 @@ async function care(taskId, action, body, after) {
   } catch (err) { fail(err); }
 }
 
-function snoozeMenu(pick) {
+async function snoozePlant(plantId, days, after) {
+  try {
+    const res = await api(`/api/plants/${plantId}/snooze`, { method: "POST", body: { days } });
+    toast(`Snoozed ${res.count} task${res.count === 1 ? "" : "s"} for ${days} day${days === 1 ? "" : "s"}`);
+    await after();
+  } catch (err) { fail(err); }
+}
+
+async function unsnooze(taskId, after) {
+  try { await api(`/api/tasks/${taskId}/unsnooze`, { method: "POST" }); toast("Snooze cleared"); await after(); } catch (err) { fail(err); }
+}
+
+function absoluteLink(link) {
+  return /^https?:\/\//.test(link) ? link : location.origin + link;
+}
+
+async function copyQuickLink(link) {
+  const url = absoluteLink(link);
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Quick link copied. Anyone with it can log this one task.");
+  } catch {
+    prompt("Copy this quick link. Anyone with it can log this one task.", url);
+  }
+}
+
+// whole: {plant, name, count} offers "snooze everything due on this plant"; pick(days, all)
+function snoozeMenu(pick, whole = null) {
   openModal(`<h2>Snooze</h2><div class="menu">
+      ${whole ? `<label class="toggle"><input type="checkbox" id="snooze-all"> All ${whole.count} due tasks for ${esc(whole.name)}</label>` : ""}
       <button data-days="1">1 day</button><button data-days="3">3 days</button><button data-days="7">7 days</button>
       <div class="row"><input type="number" id="snooze-days" min="1" max="365" placeholder="Custom days" inputmode="numeric" style="flex:1">
       <button class="primary" id="snooze-custom">Snooze</button></div>
     </div><div class="sheet-actions"><button data-close>Cancel</button></div>`, (sheet) => {
-    $$("[data-days]", sheet).forEach((b) => (b.onclick = () => { closeModal(); pick(Number(b.dataset.days)); }));
+    const all = () => Boolean($("#snooze-all", sheet)?.checked);
+    $$("[data-days]", sheet).forEach((b) => (b.onclick = () => { const a = all(); closeModal(); pick(Number(b.dataset.days), a); }));
     $("#snooze-custom", sheet).onclick = () => {
       const d = Number($("#snooze-days", sheet).value);
-      if (d >= 1 && d <= 365) { closeModal(); pick(d); } else toast("Enter 1 to 365 days");
+      if (d >= 1 && d <= 365) { const a = all(); closeModal(); pick(d, a); } else toast("Enter 1 to 365 days");
     };
   });
 }
@@ -383,6 +423,9 @@ async function renderPlant(id) {
     ["Acquired", fmtDate(p.acquired)], ["Where", p.outdoor ? "Outdoor" : "Indoor"], ["Added by", p.added_by],
   ].filter(([, v]) => v);
   const actLabel = { done: "Done", skip: "Skipped", snooze: "Snoozed", photo: "Photo", note: "Note" };
+  const dueNow = p.tasks.filter((t) => t.days <= 0).length;
+  const photos = events.filter((e) => e.photo).sort((a, b) => (a.date === b.date ? a.id - b.id : a.date < b.date ? -1 : 1));
+  const growth = feature("growth_timeline");
   $("#view").innerHTML = `
     <div class="hero">
       <div class="hero-photo">${p.photo ? `<img src="${esc(p.photo)}" alt="${esc(p.name)}">` : "🪴"}</div>
@@ -394,6 +437,7 @@ async function renderPlant(id) {
           <button id="edit-plant">Edit</button>
           <button id="add-photo">Add photo or note</button>
           <button id="dup-plant">Duplicate</button>
+          ${dueNow ? `<button id="snooze-plant">Snooze plant</button>` : ""}
         </div>
       </div>
     </div>
@@ -406,16 +450,30 @@ async function renderPlant(id) {
       <div id="tasks">${p.tasks.length ? p.tasks.map((t) => `
         <div class="task">
           <div><b>${KIND_ICON[t.kind] || ""} ${esc(t.label)}</b> <span class="due-when ${t.state}">· ${whenText(t.days)}</span>
+            ${t.snoozed ? `<span class="badge snoozed">💤 Snoozed to ${fmtDate(t.snoozed_until)}</span>` : ""}
             <div class="due-meta">${esc(t.reason)} · next ${fmtDate(t.next_due)}</div></div>
           <div class="row">
             <button class="primary" data-act="done" data-id="${t.id}">Done</button>
             <button data-act="log" data-id="${t.id}" title="Log with a date or note">Log…</button>
-            <button data-act="snooze" data-id="${t.id}">Snooze</button>
+            ${t.snoozed ? `<button data-act="unsnooze" data-id="${t.id}">Unsnooze</button>`
+              : `<button data-act="snooze" data-id="${t.id}" data-plant="${p.id}" data-plantdue="${t.days <= 0 ? dueNow : 0}" data-name="${esc(p.name)}">Snooze</button>`}
             <button data-act="skip" data-id="${t.id}">Skip</button>
+            ${t.quick_links ? `<button class="ghost" data-act="copylink" data-link="${esc(t.quick_links.done)}" title="One-tap link for a text message">Copy link</button>` : ""}
             <button class="ghost" data-edit-task="${t.id}" aria-label="Edit ${esc(t.label)} task">Edit</button>
           </div>
         </div>`).join("") : '<p class="muted">No care tasks yet.</p>'}</div>
     </section>
+    ${growth ? `<section class="card settings-section" id="growth">
+      <div class="pagehead"><h2 style="margin:0">Growth</h2><span class="muted">${photos.length} photo${photos.length === 1 ? "" : "s"}</span></div>
+      ${photos.length ? `<div class="growth-strip">${photos.map((e, i) => `
+        <button type="button" class="growth-item" data-growth="${i}" aria-label="Photo from ${fmtDate(e.date)}">
+          <img src="${esc(e.photo)}" alt="" loading="lazy">
+          <span class="growth-date">${fmtDate(e.date)}</span>
+          <span class="growth-age">${growthAge(photos[0].date, e.date, i)}</span>
+        </button>`).join("")}</div>
+        ${photos.length === 1 ? '<p class="hint">Add a photo every few weeks and they line up here, oldest first, so you can watch it grow.</p>' : ""}`
+        : '<p class="muted">Photos you add show up here oldest first, so you can watch it grow. Use Add photo or note.</p>'}
+    </section>` : ""}
     <section class="card settings-section">
       <h2 style="margin-top:0">Timeline</h2>
       ${events.length ? `<ul class="timeline">${events.map((e) => `
@@ -436,6 +494,8 @@ async function renderPlant(id) {
   $("#add-photo").onclick = () => photoModal(p, again);
   $("#add-task").onclick = () => taskForm(p, null, again);
   $$("[data-edit-task]").forEach((b) => (b.onclick = () => taskForm(p, p.tasks.find((t) => t.id === Number(b.dataset.editTask)), again)));
+  if ($("#snooze-plant")) $("#snooze-plant").onclick = () => snoozeMenu((days) => snoozePlant(id, days, again));
+  $$("[data-growth]").forEach((b) => (b.onclick = () => growthViewer(p, photos, Number(b.dataset.growth))));
   $("#dup-plant").onclick = async () => {
     try {
       const copy = await api(`/api/plants/${id}/duplicate`, { method: "POST" });
@@ -456,12 +516,56 @@ async function renderPlant(id) {
   };
 }
 
+function isoDays(a, b) {
+  const [y1, m1, d1] = a.split("-").map(Number);
+  const [y2, m2, d2] = b.split("-").map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+
+function growthAge(first, date, index) {
+  if (index === 0) return "First photo";
+  const d = isoDays(first, date);
+  if (d < 1) return "Same day";
+  if (d < 60) return `+${d} day${d === 1 ? "" : "s"}`;
+  if (d < 730) return `+${Math.round(d / 30.44)} months`;
+  return `+${(d / 365.25).toFixed(1)} years`;
+}
+
+function growthViewer(p, photos, start) {
+  let i = start;
+  const draw = (sheet) => {
+    const e = photos[i];
+    $("#gv-body", sheet).innerHTML = `<img class="gv-photo" src="${esc(e.photo)}" alt="${esc(p.name)} on ${fmtDate(e.date)}">
+      <p><b>${fmtDate(e.date)}</b> · ${growthAge(photos[0].date, e.date, i)} <span class="muted">(${i + 1} of ${photos.length})</span></p>
+      ${e.note ? `<div class="notes">${esc(e.note)}</div>` : ""}`;
+    $("#gv-prev", sheet).disabled = i === 0;
+    $("#gv-next", sheet).disabled = i === photos.length - 1;
+  };
+  openModal(`<h2>Growth · ${esc(p.name)}</h2><div id="gv-body"></div>
+    <div class="sheet-actions"><button id="gv-prev">← Older</button><button id="gv-next">Newer →</button><button data-close>Close</button></div>`, (sheet) => {
+    $("#gv-prev", sheet).onclick = () => { if (i > 0) { i--; draw(sheet); } };
+    $("#gv-next", sheet).onclick = () => { if (i < photos.length - 1) { i++; draw(sheet); } };
+    draw(sheet);
+  });
+}
+
 // ---------------------------------------------------------------- forms
 
 let libraryCache = null;
 async function getLibrary() {
   if (!libraryCache) libraryCache = await api("/api/library");
   return libraryCache;
+}
+
+// In the add-plant form, picking a task type fills its usual interval until you type your own.
+function bindKindDefaults(root) {
+  $$(".task-edit", root).forEach((r) => {
+    const kind = $("[data-f=kind]", r), days = $("[data-f=interval_days]", r);
+    if (kind.dataset.bound) return;
+    kind.dataset.bound = "1";
+    days.addEventListener("input", () => (days.dataset.touched = "1"));
+    kind.addEventListener("change", () => { if (!days.dataset.touched) days.value = KIND_DAYS[kind.value]; });
+  });
 }
 
 function taskRow(t = {}) {
@@ -506,7 +610,7 @@ async function plantForm(p) {
         <div class="full"><label for="f-src">Care source link (optional)</label><input id="f-src" name="care_source" type="url" maxlength="300" value="${esc(p?.care_source)}" placeholder="https://"></div>
       </div>
       ${isNew ? `<h2>Care tasks</h2><div id="task-rows">${taskRow({ kind: "water", interval_days: 7 })}</div>
-        <button type="button" class="small" id="add-row">Add another task</button>` : ""}
+        <div class="chips add-kinds" role="group" aria-label="Add a care task">${KINDS.filter(([k]) => k !== "water").map(([k, l]) => `<button type="button" class="chip" data-addkind="${k}">+ ${KIND_ICON[k]} ${l}</button>`).join("")}</div>` : ""}
       ${isNew ? `<div class="stack" style="margin-top:12px"><div><label for="f-photo">Photo (optional)</label><input id="f-photo" type="file" accept="image/*"></div></div>` : ""}
       <p class="error" id="form-error"></p>
       <div class="sheet-actions"><button type="button" data-close>Cancel</button><button class="primary" type="submit">${isNew ? "Add plant" : "Save"}</button></div>
@@ -535,7 +639,24 @@ async function plantForm(p) {
             form.species.value = s.scientific;
             if (!form.name.value) form.name.value = s.common || s.scientific;
             results.innerHTML = "";
-            hint.textContent = `Filled from ${s.scientific}. Edit anything before saving.`;
+            const c = isNew && s.care;
+            if (c) {
+              const rows = [taskRow({ kind: "water", interval_days: c.water_days })];
+              if (c.fertilize_days) rows.push(taskRow({ kind: "fertilize", interval_days: c.fertilize_days }));
+              if (c.mist_days) rows.push(taskRow({ kind: "mist", interval_days: c.mist_days }));
+              $("#task-rows").innerHTML = rows.join("");
+              bindRm();
+              bindKindDefaults(sheet);
+              if (c.match === "species") {
+                if (!form.light.value) form.light.value = c.light;
+                if (!form.notes.value) form.notes.value = c.care;
+                if (!form.care_source.value) form.care_source.value = c.source;
+              }
+              const extra = [c.fertilize_days ? `fertilize every ${c.fertilize_days}` : "", c.mist_days ? `mist every ${c.mist_days}` : ""].filter(Boolean).join(", ");
+              hint.textContent = `Filled from ${s.scientific}. Suggested care from the ${c.basis}: check water every ${c.water_days} days${extra ? ", " + extra : ""}. Edit anything before saving.`;
+            } else {
+              hint.textContent = `Filled from ${s.scientific}. Edit anything before saving.`;
+            }
             file.value = "";
             go.disabled = true;
           }));
@@ -546,7 +667,13 @@ async function plantForm(p) {
     }
     if (isNew) {
       bindRm();
-      $("#add-row", sheet).onclick = () => { $("#task-rows").insertAdjacentHTML("beforeend", taskRow({ kind: "fertilize", interval_days: 30 })); bindRm(); };
+      $$("[data-addkind]", sheet).forEach((b) => (b.onclick = () => {
+        const kind = b.dataset.addkind;
+        $("#task-rows").insertAdjacentHTML("beforeend", taskRow({ kind, interval_days: KIND_DAYS[kind] }));
+        bindRm();
+        bindKindDefaults(sheet);
+      }));
+      bindKindDefaults(sheet);
       const lib = await getLibrary();
       $("#lib").insertAdjacentHTML("beforeend", lib.plants.map((x) => `<option value="${esc(x.key)}">${esc(x.name)} (${esc(x.species)})</option>`).join(""));
       $("#lib").onchange = () => {
@@ -603,7 +730,7 @@ function taskForm(p, t, after) {
       <div class="form-grid">
         <div><label for="t-kind">Task</label><select id="t-kind">${KINDS.map(([k, l]) => `<option value="${k}" ${(t?.kind || "fertilize") === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
         <div><label for="t-label">Custom name (optional)</label><input id="t-label" maxlength="40" value="${esc(t?.custom_label)}" placeholder="Rotate pot"></div>
-        <div><label for="t-int">Check every (days)</label><input id="t-int" type="number" min="1" max="730" inputmode="numeric" required value="${esc(t?.interval_days ?? 30)}"></div>
+        <div><label for="t-int">Check every (days)</label><input id="t-int" type="number" min="1" max="730" inputmode="numeric" required value="${esc(t?.interval_days ?? KIND_DAYS[t?.kind || "fertilize"])}"></div>
         <div><label for="t-win">Winter interval (days)</label><input id="t-win" type="number" min="1" max="730" inputmode="numeric" value="${esc(t?.winter_interval_days ?? "")}" placeholder="Use the season setting"></div>
         ${isNew ? `<div><label for="t-last">Last done (optional)</label><input id="t-last" type="date" max="${localToday()}"></div>` : ""}
       </div>
@@ -613,6 +740,11 @@ function taskForm(p, t, after) {
         ${isNew ? "" : '<button type="button" class="danger" id="t-del">Delete task</button>'}
         <button type="button" data-close>Cancel</button><button class="primary" type="submit">Save</button></div>
     </form>`, (sheet) => {
+    if (isNew) {
+      let touched = false;
+      $("#t-int", sheet).oninput = () => (touched = true);
+      $("#t-kind", sheet).onchange = () => { if (!touched) $("#t-int", sheet).value = KIND_DAYS[$("#t-kind", sheet).value]; };
+    }
     $("#task-form", sheet).onsubmit = async (e) => {
       e.preventDefault();
       const body = {
@@ -673,6 +805,15 @@ async function renderSettings() {
       <h2 style="margin:0">General</h2>
       <div><label for="s-name">App name</label><div class="row"><input id="s-name" maxlength="60" value="${esc(settings.app_name)}" style="flex:1"><button id="s-name-save">Save</button></div></div>
       <div><label for="s-units">Units</label><select id="s-units"><option value="imperial" ${settings.units !== "metric" ? "selected" : ""}>°F, inches, mph</option><option value="metric" ${settings.units === "metric" ? "selected" : ""}>°C, mm, km/h</option></select></div>
+    </section>
+    <section class="card settings-section stack" id="features">
+      <h2 style="margin:0">Features</h2>
+      <p class="muted" style="margin:0">Turn the extras on or off for everyone. Turning one off hides it; nothing is deleted.</p>
+      <label class="toggle"><input type="checkbox" data-feature="growth_timeline" ${settings.feature_growth_timeline ? "checked" : ""}> Growth timeline <span class="muted">· each plant's photos side by side, oldest first</span></label>
+      <label class="toggle"><input type="checkbox" data-feature="care_suggestions" ${settings.feature_care_suggestions ? "checked" : ""}> Care suggestions <span class="muted">· photo ID pre-fills water and fertilize intervals</span></label>
+      <label class="toggle"><input type="checkbox" data-feature="quick_links" ${settings.feature_quick_links ? "checked" : ""}> One-tap quick links <span class="muted">· log care from a notification without signing in</span></label>
+      <p class="hint" style="margin:0">A quick link can only log or snooze its own task. Set "App address for links" under Notifications so the links in alerts work away from home. If a link ever ends up somewhere it shouldn't, reset them all.</p>
+      <div><button class="small" id="ql-reset">Reset all quick links</button></div>
     </section>
     <section class="card settings-section stack">
       <h2 style="margin:0">Weather location</h2>
@@ -756,6 +897,11 @@ function bindSettings(admin) {
   if (admin) {
     $("#s-name-save").onclick = async () => { await saveSettings({ app_name: $("#s-name").value }); $("#app-name").textContent = state.settings.app_name; document.title = state.settings.app_name; };
     $("#s-units").onchange = () => saveSettings({ units: $("#s-units").value });
+    $$("[data-feature]").forEach((cb) => (cb.onchange = () => saveSettings({ [`feature_${cb.dataset.feature}`]: cb.checked }, cb.checked ? "Turned on" : "Turned off")));
+    $("#ql-reset").onclick = async () => {
+      if (!confirm("Reset every quick link? Links already sent in old notifications stop working.")) return;
+      try { const r = await api("/api/quick-links/reset", { method: "POST" }); toast(`Reset ${r.reset} link${r.reset === 1 ? "" : "s"}`); } catch (err) { fail(err); }
+    };
     const search = async () => {
       const q = $("#wx-q").value.trim();
       if (q.length < 2) return;
