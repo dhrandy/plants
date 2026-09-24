@@ -254,3 +254,58 @@ def test_identify_without_key_explains_itself(app_url, width, height):
         assert page.evaluate("document.documentElement.scrollWidth") <= width
         assert not errors, errors
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_quick_link_growth_and_snooze_ui(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        sign_in(page, app_url)
+        png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        pid = page.evaluate("""async (png) => {
+            const r = await fetch('/api/plants', {method:'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({name:'Growth test ' + Math.random().toString(36).slice(2, 7),
+                tasks:[{kind:'water', interval_days:7}, {kind:'rotate', interval_days:7}]})});
+            const plant = await r.json();
+            const bytes = Uint8Array.from(atob(png), (ch) => ch.charCodeAt(0));
+            for (const d of ['2026-01-05', '2026-03-01']) {
+              const fd = new FormData(); fd.append('photo', new Blob([bytes], {type:'image/png'}), 'p.png'); fd.append('date', d);
+              await fetch(`/api/plants/${plant.id}/events`, {method:'POST', body: fd});
+            }
+            return plant.id; }""", png)
+        page.goto(f"{app_url}/#/plant/{pid}")
+        growth = page.locator("#growth")
+        expect(growth).to_be_visible()
+        expect(growth.locator(".growth-item")).to_have_count(2)
+        expect(growth.locator(".growth-item").first).to_contain_text("First photo")
+        growth.locator(".growth-item").nth(1).click()
+        expect(page.locator("#gv-body")).to_contain_text("2 of 2")
+        page.keyboard.press("Escape")
+        # Snooze the whole plant, then unsnooze one task.
+        page.get_by_role("button", name="Snooze plant").click()
+        page.get_by_role("button", name="3 days").click()
+        expect(page.locator(".badge.snoozed")).to_have_count(2)
+        page.get_by_role("button", name="Unsnooze").first.click()
+        expect(page.locator(".badge.snoozed")).to_have_count(1)
+        # A quick link logs care in a browser that isn't signed in.
+        link = page.evaluate(f"""async () => {{
+            const p = await (await fetch('/api/plants/{pid}')).json();
+            return p.tasks.find((t) => t.kind === 'water' && !t.snoozed)?.quick_links.done
+              || p.tasks.find((t) => t.kind === 'water').quick_links.done; }}""")
+        anon = browser.new_page(viewport={"width": width, "height": height})
+        anon.goto(app_url + link)
+        expect(anon.locator("main")).to_contain_text("Logged: watered today")
+        events = page.evaluate(f"async () => (await (await fetch('/api/plants/{pid}/events')).json()).filter((e) => e.via === 'Quick link').length")
+        assert events == 1
+        # Turning the growth timeline off hides it.
+        page.evaluate("async () => fetch('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({feature_growth_timeline:false})})")
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        expect(page.locator("#growth")).to_have_count(0)
+        page.evaluate("async () => fetch('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({feature_growth_timeline:true})})")
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        assert errors == []
+        browser.close()
