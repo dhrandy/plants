@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -23,12 +24,12 @@ from typing import Any, Literal
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from app.library import LIBRARY, SOURCE as LIBRARY_SOURCE
+from app.library import LIBRARY, SOURCE as LIBRARY_SOURCE, care_suggestion
 
 BASE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("PLANTS_DATA_DIR", "/app/data"))
@@ -59,16 +60,29 @@ API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 WEATHER_TTL_SECONDS = 30 * 60
 
-TASK_KINDS = ("water", "fertilize", "mist", "repot", "custom")
+TASK_KINDS = ("water", "fertilize", "mist", "repot", "rotate", "custom")
 TASK_LABELS = {
     "water": "Water",
     "fertilize": "Fertilize",
     "mist": "Mist",
     "repot": "Repot",
+    "rotate": "Rotate",
     "custom": "Care",
 }
+# Past-tense wording for one-tap links and their confirmation page.
+TASK_DONE_WORDS = {
+    "water": "watered",
+    "fertilize": "fertilized",
+    "mist": "misted",
+    "repot": "repotted",
+    "rotate": "rotated",
+    "custom": "done",
+}
+QUICK_FAIL_LIMIT = 20
+QUICK_FAIL_WINDOW_SECONDS = 15 * 60
 
 _login_failures: dict[str, deque[float]] = defaultdict(deque)
+_quick_failures: dict[str, deque[float]] = defaultdict(deque)
 _login_lock = threading.Lock()
 _api_calls: dict[str, deque[float]] = defaultdict(deque)
 _api_failures: dict[str, deque[float]] = defaultdict(deque)
@@ -285,6 +299,11 @@ def init_db() -> None:
           created_at TEXT NOT NULL,
           last_success_at TEXT,
           last_error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS quick_links (
+          task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+          token TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_tasks_plant ON tasks(plant_id);
         CREATE INDEX IF NOT EXISTS idx_events_plant ON events(plant_id, date);
@@ -544,6 +563,7 @@ def task_status(task, season: dict[str, Any], on: date | None = None) -> dict[st
     created = iso_date(str(task["created_at"])[:10]) or on
     due = start + timedelta(days=effective) if start else created
     snoozed = iso_date(task["snoozed_until"])
+    is_snoozed = bool(snoozed and snoozed > due and snoozed > on)
     if snoozed and snoozed > due:
         due = snoozed
     days = (due - on).days
@@ -569,6 +589,7 @@ def task_status(task, season: dict[str, Any], on: date | None = None) -> dict[st
         "days": days,
         "state": state,
         "effective_interval": effective,
+        "snoozed": is_snoozed,
         "reason": (lambda r: r[:1].upper() + r[1:])(", ".join(parts)),
     }
 
@@ -608,6 +629,7 @@ def plant_dict(c, row, season=None) -> dict[str, Any]:
         for t in c.execute("SELECT * FROM tasks WHERE plant_id=? ORDER BY id", (row["id"],))
     ]
     tasks.sort(key=lambda t: (t["days"], t["id"]))
+    with_quick_links(c, tasks)
     return {
         "id": row["id"],
         "name": row["name"],
@@ -686,11 +708,49 @@ def apply_care(c, task, action: str, user_id: int, when: str | None = None, days
     c.execute("UPDATE plants SET updated_at=? WHERE id=?", (now_iso(), task["plant_id"]))
 
 
+# ---------------------------------------------------------------- optional features
+
+FEATURES = ("growth_timeline", "quick_links", "care_suggestions")
+
+
+def feature_on(c, name: str) -> bool:
+    return get_setting(c, f"feature_{name}", "1") == "1"
+
+
+# ---------------------------------------------------------------- one-tap quick links
+# A quick link lets someone log one task from a text message without signing in.
+# Each task gets its own random token, so a link can only ever touch that one task,
+# and the master API tokens never appear in a URL. Opening the link shows a page;
+# the page itself submits the change, so link previews in chat apps can't log care.
+
+
+def quick_token(c, task_id: int) -> str:
+    row = c.execute("SELECT token FROM quick_links WHERE task_id=?", (task_id,)).fetchone()
+    if row:
+        return row["token"]
+    token = secrets.token_urlsafe(18)
+    c.execute("INSERT INTO quick_links(task_id,token,created_at) VALUES(?,?,?)", (task_id, token, now_iso()))
+    return token
+
+
+def quick_links_for(c, task_id: int) -> dict[str, str]:
+    base = get_setting(c, "public_url", "").strip().rstrip("/")
+    url = f"{base}/q/{quick_token(c, task_id)}"
+    return {"done": url, "snooze_1": f"{url}?a=snooze&days=1", "snooze_3": f"{url}?a=snooze&days=3"}
+
+
+def with_quick_links(c, tasks: list[dict[str, Any]], key: str = "id") -> None:
+    if not feature_on(c, "quick_links"):
+        return
+    for t in tasks:
+        t["quick_links"] = quick_links_for(c, t[key])
+
+
 # ---------------------------------------------------------------- models
 
 
 class TaskIn(BaseModel):
-    kind: Literal["water", "fertilize", "mist", "repot", "custom"] = "water"
+    kind: Literal["water", "fertilize", "mist", "repot", "rotate", "custom"] = "water"
     label: str = Field(default="", max_length=40)
     interval_days: int = Field(ge=1, le=730)
     winter_interval_days: int | None = Field(default=None, ge=1, le=730)
@@ -1036,6 +1096,45 @@ def task_snooze(task_id: int, body: CareIn, request: Request):
     return care_endpoint(task_id, "snooze", body, current_user(request)["id"])
 
 
+class SnoozeIn(BaseModel):
+    days: int = Field(ge=1, le=365)
+    note: str = Field(default="", max_length=1000)
+
+
+def snooze_plant(c, plant_id: int, days: int, user_id: int | None, via: str = "") -> int:
+    """Snooze everything on a plant that's due today or overdue. Returns how many tasks moved."""
+    get_plant_row(c, plant_id)
+    season = season_config(c)
+    tasks = c.execute("SELECT * FROM tasks WHERE plant_id=?", (plant_id,)).fetchall()
+    due = [t for t in tasks if task_status(t, season)["days"] <= 0]
+    if not due:
+        raise HTTPException(400, "Nothing is due on this plant right now")
+    for t in due:
+        apply_care(c, t, "snooze", user_id, days=days, note="", via=via)
+    return len(due)
+
+
+def unsnooze_task(c, task_id: int) -> dict[str, Any]:
+    task = get_task_row(c, task_id)
+    c.execute("UPDATE tasks SET snoozed_until=NULL WHERE id=?", (task_id,))
+    return plant_dict(c, get_plant_row(c, task["plant_id"]))
+
+
+@app.post("/api/plants/{plant_id}/snooze")
+def plant_snooze(plant_id: int, body: SnoozeIn, request: Request):
+    user = current_user(request)
+    with db() as c:
+        n = snooze_plant(c, plant_id, body.days, user["id"])
+        return {"count": n, "plant": plant_dict(c, get_plant_row(c, plant_id))}
+
+
+@app.post("/api/tasks/{task_id}/unsnooze")
+def task_unsnooze(task_id: int, request: Request):
+    current_user(request)
+    with db() as c:
+        return unsnooze_task(c, task_id)
+
+
 @app.post("/api/care/batch")
 def batch_care(body: BatchIn, request: Request):
     user = current_user(request)
@@ -1067,6 +1166,7 @@ def due_items(c, horizon: int = 7) -> list[dict[str, Any]]:
                     }
                 )
     items.sort(key=lambda i: (i["days"], i["room"].lower(), i["plant_name"].lower()))
+    with_quick_links(c, items, "task_id")
     return items
 
 
@@ -1075,6 +1175,128 @@ def list_due(request: Request, days: int = 7):
     current_user(request)
     with db() as c:
         return {"today": today().isoformat(), "items": due_items(c, max(0, min(days, 60)))}
+
+
+# ---------------------------------------------------------------- one-tap quick link pages
+
+
+def quick_page(title: str, body: str, status: int = 200, auto: bool = False) -> HTMLResponse:
+    doc = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{html.escape(title)}</title>
+<link rel="icon" href="/static/icon.svg">
+<style>
+body{{font:17px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0d1117;color:#f1f5f9;
+display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px;box-sizing:border-box}}
+main{{background:#151b23;border:1px solid #2b3545;border-radius:16px;box-shadow:0 16px 40px rgba(0,0,0,.35);padding:28px 24px;max-width:380px;width:100%;text-align:center}}
+h1{{font-size:22px;margin:8px 0 6px}} p{{margin:8px 0;color:#93a4b8}} .big{{font-size:44px}}
+button{{font:inherit;font-weight:600;background:#567e55;color:#fff;border:0;border-radius:12px;padding:14px 20px;width:100%;margin-top:14px;cursor:pointer}}
+button:disabled{{opacity:.6}} a{{color:#58a6ff}}
+</style></head>
+<body><main{' data-auto="1"' if auto else ''}>{body}</main>
+<script src="/static/quick.js"></script></body></html>"""
+    return HTMLResponse(doc, status_code=status, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"})
+
+
+def quick_denied(request: Request) -> HTMLResponse | None:
+    """Rate limit quick links: wrong tokens (guessing) and plain volume, both per client IP."""
+    ip = client_ip(request)
+    with _api_lock:
+        retry = _window(_quick_failures[ip], QUICK_FAIL_LIMIT, QUICK_FAIL_WINDOW_SECONDS, False) or \
+            _window(_api_calls[f"quick:{ip}"], API_LIMIT, API_WINDOW_SECONDS, True)
+    if retry:
+        resp = quick_page("Too many tries", '<div class="big">⏳</div><h1>Too many tries</h1><p>Try again in a few minutes.</p>', 429)
+        resp.headers["Retry-After"] = str(retry)
+        return resp
+    return None
+
+
+def quick_find(c, token: str, request: Request):
+    """The task and plant behind a quick-link token, or None (and a strike against the caller's IP)."""
+    row = None
+    if re.fullmatch(r"[A-Za-z0-9_-]{16,64}", token or ""):
+        row = c.execute(
+            """SELECT t.*, p.name AS plant_name FROM quick_links q JOIN tasks t ON t.id=q.task_id
+            JOIN plants p ON p.id=t.plant_id WHERE q.token=?""",
+            (token,),
+        ).fetchone()
+    if not row:
+        with _api_lock:
+            _quick_failures[client_ip(request)].append(time.monotonic())
+    return row
+
+
+def quick_action(a: str, days: int | None) -> tuple[str, int | None]:
+    if a == "snooze":
+        return "snooze", days if days and 1 <= days <= 30 else 1
+    return "done", None
+
+
+def quick_words(task, action: str, days: int | None) -> str:
+    if action == "snooze":
+        return f"snoozed {days} day{'s' if days != 1 else ''}"
+    return TASK_DONE_WORDS.get(task["kind"], "done") if not task["label"] else f"{task['label'].lower()} done"
+
+
+QUICK_OFF = '<div class="big">🔒</div><h1>Link not active</h1><p>Quick links are turned off, or this link was reset. Open Plants to log care.</p>'
+QUICK_BAD = '<div class="big">🤔</div><h1>Link not found</h1><p>This quick link doesn\'t exist anymore. The task may have been deleted or the links reset.</p>'
+
+
+@app.get("/q/{token}", include_in_schema=False)
+def quick_open(token: str, request: Request, a: str = "done", days: int | None = None):
+    denied = quick_denied(request)
+    if denied:
+        return denied
+    with db() as c:
+        if not feature_on(c, "quick_links"):
+            return quick_page("Link not active", QUICK_OFF, 404)
+        task = quick_find(c, token, request)
+        if not task:
+            return quick_page("Link not found", QUICK_BAD, 404)
+        action, days = quick_action(a, days)
+        name = html.escape(task["plant_name"])
+        label = TASK_LABELS.get(task["kind"], "Care") if not task["label"] else task["label"]
+        verb = f"Snooze {html.escape(label.lower())} {days} day{'s' if days != 1 else ''}" if action == "snooze" \
+            else f"Mark {html.escape(quick_words(task, 'done', None))}"
+    body = f"""<div class="big">🪴</div><h1>{name}</h1><p id="quick-status">Tap to confirm.</p>
+<form method="post"><input type="hidden" name="a" value="{action}"><input type="hidden" name="days" value="{days or ''}">
+<button type="submit">{verb}</button></form>"""
+    return quick_page(f"{task['plant_name']} · {label}", body, auto=True)
+
+
+@app.post("/q/{token}", include_in_schema=False)
+def quick_submit(token: str, request: Request, a: str = Form(default="done"), days: str = Form(default="")):
+    denied = quick_denied(request)
+    if denied:
+        return denied
+    with db() as c:
+        if not feature_on(c, "quick_links"):
+            return quick_page("Link not active", QUICK_OFF, 404)
+        task = quick_find(c, token, request)
+        if not task:
+            return quick_page("Link not found", QUICK_BAD, 404)
+        action, n = quick_action(a, int(days) if days.isdigit() else None)
+        name = html.escape(task["plant_name"])
+        base = get_setting(c, "public_url", "").strip().rstrip("/") or ""
+        open_link = f'<p><a href="{html.escape(base)}/#/plant/{task["plant_id"]}">Open {name} in Plants</a></p>'
+        already = action == "done" and c.execute(
+            "SELECT 1 FROM events WHERE task_id=? AND action='done' AND date=?", (task["id"], today().isoformat())
+        ).fetchone()
+        if already:
+            return quick_page("Already logged", f'<div class="big">✅</div><h1>{name}</h1><p>Already {html.escape(quick_words(task, "done", None))} today. Nothing changed.</p>{open_link}')
+        apply_care(c, task, action, None, days=n, via="Quick link")
+    words = html.escape(quick_words(task, action, n))
+    return quick_page("Logged", f'<div class="big">{"💤" if action == "snooze" else "✅"}</div><h1>{name}</h1><p>Logged: {words}{" today" if action == "done" else ""}.</p>{open_link}')
+
+
+@app.post("/api/quick-links/reset")
+def reset_quick_links(request: Request):
+    current_user(request, True)
+    with db() as c:
+        n = c.execute("DELETE FROM quick_links").rowcount
+    return {"ok": True, "reset": n}
 
 
 # ---------------------------------------------------------------- timeline and photos
@@ -1326,12 +1548,26 @@ async def identify_photo(request: Request, photo: UploadFile = File(...)):
         scientific = species.get("scientificNameWithoutAuthor") or species.get("scientificName") or ""
         if not scientific:
             continue
+        genus = (species.get("genus") or {}).get("scientificNameWithoutAuthor") or ""
+        family = (species.get("family") or {}).get("scientificNameWithoutAuthor") or ""
         suggestions.append({
             "scientific": scientific,
             "common": (species.get("commonNames") or [""])[0],
             "score": round((result.get("score") or 0) * 100),
+            "genus": genus,
+            "family": family,
         })
+    with db() as c:
+        suggest = feature_on(c, "care_suggestions")
+    for s in suggestions:
+        s["care"] = care_suggestion(s["scientific"], s["genus"], s["family"]) if suggest else None
     return {"suggestions": suggestions}
+
+
+@app.get("/api/care-suggestion")
+def care_suggestion_endpoint(request: Request, species: str = "", genus: str = "", family: str = ""):
+    current_user(request)
+    return {"care": care_suggestion(species, genus, family)}
 
 
 # ---------------------------------------------------------------- weather (Open-Meteo)
@@ -1483,6 +1719,9 @@ SETTINGS_DEFAULTS = {
     "units": "imperial",
     "winter_months": "11,12,1,2",
     "winter_multiplier": "1",
+    "feature_growth_timeline": "1",
+    "feature_quick_links": "1",
+    "feature_care_suggestions": "1",
 }
 
 
@@ -1490,6 +1729,8 @@ def read_settings(c) -> dict[str, Any]:
     out = {k: get_setting(c, k, v) for k, v in SETTINGS_DEFAULTS.items()}
     out["winter_multiplier"] = float(out["winter_multiplier"] or 1)
     out["winter_months"] = sorted(winter_months(c))
+    for name in FEATURES:
+        out[f"feature_{name}"] = out[f"feature_{name}"] == "1"
     return out
 
 
@@ -1502,6 +1743,9 @@ class SettingsIn(BaseModel):
     units: Literal["imperial", "metric"] | None = None
     winter_months: list[int] | None = None
     winter_multiplier: float | None = Field(default=None, ge=0.25, le=4)
+    feature_growth_timeline: bool | None = None
+    feature_quick_links: bool | None = None
+    feature_care_suggestions: bool | None = None
 
     @field_validator("winter_months")
     @classmethod
@@ -1541,6 +1785,10 @@ def update_settings(body: SettingsIn, request: Request):
             set_setting(c, "winter_months", ",".join(str(m) for m in body.winter_months))
         if body.winter_multiplier is not None:
             set_setting(c, "winter_multiplier", f"{body.winter_multiplier:g}")
+        for name in FEATURES:
+            value = getattr(body, f"feature_{name}")
+            if value is not None:
+                set_setting(c, f"feature_{name}", "1" if value else "0")
         return read_settings(c)
 
 
@@ -1725,10 +1973,44 @@ def v1_due(request: Request, days: int = 7):
         return {"today": today().isoformat(), "items": due_items(c, max(0, min(days, 60)))}
 
 
+@app.post("/api/v1/tasks/{task_id}/unsnooze", tags=["v1"], summary="Clear a snooze so the task is due on its normal date")
+def v1_unsnooze(task_id: int, request: Request):
+    token_auth(request)
+    with db() as c:
+        return unsnooze_task(c, task_id)
+
+
 @app.post("/api/v1/tasks/{task_id}/{action}", tags=["v1"], summary="Log care: done, skip, or snooze")
 def v1_care(task_id: int, action: Literal["done", "skip", "snooze"], body: CareIn, request: Request):
     token, user = token_auth(request)
     return care_endpoint(task_id, action, body, user["id"], via=token["name"])
+
+
+@app.post("/api/v1/plants/{plant_id}/snooze", tags=["v1"],
+          summary="Snooze everything due on a plant for N days")
+def v1_plant_snooze(plant_id: int, body: SnoozeIn, request: Request):
+    token, user = token_auth(request)
+    with db() as c:
+        n = snooze_plant(c, plant_id, body.days, user["id"], via=token["name"])
+        return {"count": n, "plant": plant_dict(c, get_plant_row(c, plant_id))}
+
+
+@app.get("/api/v1/tasks/{task_id}/quick-links", tags=["v1"],
+         summary="One-tap links for a task, safe to put in a text message (no token in the URL)")
+def v1_quick_links(task_id: int, request: Request):
+    token_auth(request)
+    with db() as c:
+        get_task_row(c, task_id)
+        if not feature_on(c, "quick_links"):
+            raise HTTPException(404, "Quick links are turned off in Settings")
+        return quick_links_for(c, task_id)
+
+
+@app.get("/api/v1/care-suggestion", tags=["v1"],
+         summary="Suggested starting care intervals for a species, from the starter library or its plant group")
+def v1_care_suggestion(request: Request, species: str = "", genus: str = "", family: str = ""):
+    token_auth(request)
+    return {"care": care_suggestion(species, genus, family)}
 
 
 @app.post("/api/v1/plants/{plant_id}/photos", tags=["v1"], status_code=201,
@@ -1841,7 +2123,10 @@ def describe(item: dict[str, Any], base: str) -> str:
         when = "due today"
     where = f" ({item['room']})" if item["room"] else ""
     line = f"{item['label']} check: {item['plant_name']}{where} - {when}"
-    if base:
+    links = item.get("quick_links")
+    if base and links:
+        line += f"\n{'Watered' if item['kind'] == 'water' else 'Done'}? Tap: {links['done']}"
+    elif base:
         line += f"\n{base.rstrip('/')}/#/plant/{item['plant_id']}"
     return line
 
