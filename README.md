@@ -60,13 +60,16 @@ Any tool that accepts a compose file works: paste the compose block above into a
 ## Features
 
 - **Today view**: Overdue, Today, and Next 7 days, with the reason for each due date ("every 7 days, last done Sep 20"). Filter by room.
-- **Done, Snooze, Skip**: Done logs the care. Snooze pushes it 1, 3, 7, or any number of days. Skip means you checked and it doesn't need it yet; the cycle restarts from today without changing the last-watered date. **Log…** on a plant lets you backdate care and add a note.
+- **Done, Snooze, Skip**: Done logs the care. Snooze pushes it 1, 3, 7, or any number of days; snoozed tasks show a "Snoozed to" badge and an **Unsnooze** button. **Snooze plant** (or the "all due tasks" box in the snooze menu) snoozes everything due on a plant at once. Skip means you checked and it doesn't need it yet; the cycle restarts from today without changing the last-watered date. **Log…** on a plant lets you backdate care and add a note.
 - **Batch care**: tick several plants (or **Select all** in a section, filtered by room) and mark them done, snoozed, or skipped at once.
 - **Plant profiles**: name, species (whatever the tag says), room, light, pot size and material, acquired date, indoor or outdoor, care notes, and a care source link.
-- **Care tasks**: watering, fertilizing, misting, repotting, or custom, each with its own check interval and optional winter interval. Duplicate a plant to copy its setup.
+- **Care tasks**: watering, fertilizing, misting, repotting, rotating, or custom, each with its own check interval and optional winter interval. All of them show on Today next to watering. When adding a plant, tap **+ Fertilize**, **+ Mist**, **+ Repot**, **+ Rotate** to add a task with a sensible starting interval. Duplicate a plant to copy its setup.
 - **Starter library**: twelve common houseplants that pre-fill species, light, care notes, and conservative starting intervals, each linked to its NC State Extension Plant Toolbox page. Everything stays editable; intervals mean "check the soil", not "water now".
-- **Photo timeline**: every care entry and photo lands on the plant's timeline with who logged it, so it doubles as a growth history. Pick any timeline photo as the main photo.
-- **Photo identification**: when adding or editing a plant, identify it from a photo through [Pl@ntNet](https://plantnet.org/) and fill the name and species from the top suggestions. Needs one free API key; see [Photo identification](#photo-identification).
+- **Photo timeline**: every care entry and photo lands on the plant's timeline with who logged it. Pick any timeline photo as the main photo.
+- **Growth timeline** (optional): each plant's photos side by side, oldest first, labeled with the date and how long since the first photo. Tap one to flip through them full size.
+- **One-tap quick links** (optional): every task gets its own link that logs it without signing in, made for the daily notification. See [One-tap quick links](#one-tap-quick-links).
+- **Photo identification**: when adding or editing a plant, identify it from a photo through [Pl@ntNet](https://plantnet.org/) and fill the name and species from the top suggestions. With **care suggestions** on, picking a match also pre-fills starting water, fertilize, and mist intervals. Needs one free API key; see [Photo identification](#photo-identification).
+- **Feature switches**: administrators can turn the growth timeline, care suggestions, and quick links on or off in **Settings → Features**. Turning one off hides it; nothing is deleted.
 - **Seasons**: choose your winter months and a winter stretch (x1.25, x1.5, x2), or set a winter interval on a specific task. Nothing changes a schedule behind your back.
 - **Weather**: current conditions and a 5-day forecast (temperature, humidity, rain chance and amount) for a location you pick, with plain hints like "Rain likely tomorrow; outdoor pots may not need water". Weather never changes schedules.
 - **Notifications**: daily digest or one alert per plant through [Apprise](https://github.com/caronc/apprise), with quiet hours, a send-from hour, repeat reminders for overdue plants, and links back to the plant.
@@ -98,7 +101,7 @@ See the [Apprise wiki](https://github.com/caronc/apprise/wiki) for every service
 - **Send from**: alerts wait until this hour.
 - **Quiet hours**: nothing is sent between start and end.
 - **Repeat overdue every**: re-send overdue plants every N days (0 turns repeats off).
-- **App address**: your public URL, so alerts link straight to the plant.
+- **App address**: your public URL, so alerts link straight to the plant. With quick links on, each alert line carries a "Watered? Tap:" link instead.
 
 The server checks every 10 minutes. Each due date is announced once. Notification URLs often contain secrets; they are stored in the database and only administrators can see them.
 
@@ -161,6 +164,19 @@ Identification runs on your server, which calls the [Pl@ntNet API](https://my.pl
 
 Without a key, the add/edit plant form shows a short note that identification isn't set up, and nothing else changes.
 
+**Care suggestions.** When you pick a match while adding a plant, Plants looks the species up in its starter library (exact species first, then the same genus) and, failing that, in a short list of broad plant groups such as cacti, succulents, aroids, ferns, and orchids. It fills the water, fertilize, and mist intervals, plus light and care notes on an exact library match, and says where the numbers came from. No extra service or key is involved. If nothing matches, it fills only the species and name. Turn it off in **Settings → Features**.
+
+## One-tap quick links
+
+Each task can have a quick link like `https://plants.example.com/q/<random-code>`. Opening it shows the plant and logs the task in one tap, without signing in. It's built for the daily notification: set **Settings → Notifications → App address**, and every alert line gets a "Watered? Tap:" link. **Copy link** on a task copies its link, and the API returns links for scripts that build their own digest.
+
+- Each link is a random code for one task. It can only mark that task done or snooze it (add `?a=snooze&days=3`, 1 to 30 days). It can't read other plants, change settings, or reach the API.
+- API tokens never go in a link.
+- Opening a link doesn't change anything by itself; the page submits the change. So chat apps that fetch a link to build a preview can't log care by accident. Tapping the same link twice in a day logs it once.
+- Entries show "via Quick link" on the timeline.
+- Wrong codes are rate limited per IP (20 misses per 15 minutes), and links are limited to 100 requests a minute per IP.
+- Anyone who has a link can log that task, so treat links like a house key for one chore. **Settings → Features → Reset all quick links** makes every old link stop working; new ones are issued automatically. Turning quick links off disables every link at once.
+
 ## API tokens
 
 Create a token in **Settings → API tokens** (the token is shown once). Send it as `Authorization: Bearer <token>`. Interactive docs are at `/api/docs`.
@@ -173,10 +189,14 @@ Create a token in **Settings → API tokens** (the token is shown once). Send it
 | PATCH | `/api/v1/plants/{id}` | Update some fields |
 | POST | `/api/v1/plants/{id}/tasks` | Add a care task |
 | POST | `/api/v1/plants/{id}/photos` | Add a photo and/or note (multipart: `photo`, `note`, `date`, `main`) |
-| GET | `/api/v1/due?days=7` | What's overdue, due today, or due soon |
+| GET | `/api/v1/due?days=7` | What's overdue, due today, or due soon (each item includes `quick_links` when quick links are on) |
 | POST | `/api/v1/tasks/{id}/done` | Log care (`{"date": "YYYY-MM-DD", "note": "..."}`, both optional) |
 | POST | `/api/v1/tasks/{id}/skip` | Skip this cycle |
 | POST | `/api/v1/tasks/{id}/snooze` | Snooze (`{"days": 3}`) |
+| POST | `/api/v1/tasks/{id}/unsnooze` | Clear a snooze |
+| POST | `/api/v1/plants/{id}/snooze` | Snooze everything due on a plant (`{"days": 3}`) |
+| GET | `/api/v1/tasks/{id}/quick-links` | One-tap links for a task (`done`, `snooze_1`, `snooze_3`) |
+| GET | `/api/v1/care-suggestion?species=...` | Suggested starting intervals for a species |
 | GET | `/api/v1/rooms` | Rooms |
 | GET | `/api/v1/library` | Starter library |
 
@@ -201,7 +221,7 @@ Plants works behind any reverse proxy (Caddy, Nginx, Nginx Proxy Manager, Traefi
 - Set `PLANTS_COOKIE_SECURE=true` once the site is on HTTPS so session cookies are only sent over HTTPS.
 - Set `FORWARDED_ALLOW_IPS` to your proxy's IP so rate limits see real client addresses. Only use `*` if the container is reachable solely through the proxy.
 
-Built in: passwords hashed with PBKDF2, HttpOnly SameSite=Strict session cookies, login rate limiting (5 failures per 15 minutes per IP), a strict Content Security Policy and other security headers, upload type and size checks (JPEG, PNG, WebP, GIF, HEIC up to 10 MB), and photos served only to signed-in users.
+Built in: passwords hashed with PBKDF2, HttpOnly SameSite=Strict session cookies, login rate limiting (5 failures per 15 minutes per IP), a strict Content Security Policy and other security headers, upload type and size checks (JPEG, PNG, WebP, GIF, HEIC up to 10 MB), and photos served only to signed-in users. One-tap quick links are per-task random codes with their own rate limits, never contain API tokens, and never change anything on a plain page load; see [One-tap quick links](#one-tap-quick-links).
 
 ## Backup
 
