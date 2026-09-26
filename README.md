@@ -22,7 +22,7 @@ Plants is a simple household plant care log with reminders. It shows what needs 
 
 **Mobile view** - Plants on a phone.
 
-![Mobile view](docs/screenshots/plants-mobile-blurred.jpg)
+<img src="docs/screenshots/plants-mobile-blurred.jpg" alt="Mobile view" width="380">
 
 ## Quick start
 
