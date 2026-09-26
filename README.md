@@ -28,23 +28,23 @@ Plants is a simple household plant care log with reminders. It shows what needs 
          - ./data:/app/data
        environment:
          # Your timezone, so "due today" and quiet hours match your clock.
-         - TZ=${TZ:-UTC}
+         - TZ=${TZ}
          # Set to true once Plants is served over HTTPS (reverse proxy).
-         - PLANTS_COOKIE_SECURE=${PLANTS_COOKIE_SECURE:-false}
+         - PLANTS_COOKIE_SECURE=${PLANTS_COOKIE_SECURE}
          # IP of your reverse proxy, so login rate limits see real client addresses.
-         - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
+         - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS}
          # Browser push. Generate a key pair once (see "Browser push" in the readme); leave empty to keep push off.
-         - PLANTS_VAPID_PUBLIC_KEY=${PLANTS_VAPID_PUBLIC_KEY:-}
-         - PLANTS_VAPID_PRIVATE_KEY=${PLANTS_VAPID_PRIVATE_KEY:-}
+         - PLANTS_VAPID_PUBLIC_KEY=${PLANTS_VAPID_PUBLIC_KEY}
+         - PLANTS_VAPID_PRIVATE_KEY=${PLANTS_VAPID_PRIVATE_KEY}
          # Contact the push services can reach you at: mailto:you@example.com or your https:// address.
-         - PLANTS_VAPID_SUBJECT=${PLANTS_VAPID_SUBJECT:-}
+         - PLANTS_VAPID_SUBJECT=${PLANTS_VAPID_SUBJECT}
          # Photo identification with Pl@ntNet. Get a free key at https://my.plantnet.org/ (see "Photo identification" in the readme); leave empty to keep it off.
-         - PLANTS_PLANTNET_API_KEY=${PLANTS_PLANTNET_API_KEY:-}
+         - PLANTS_PLANTNET_API_KEY=${PLANTS_PLANTNET_API_KEY}
        ports:
          - 8653:8000
    ```
 
-   No `.env` file is needed. The `${VAR:-default}` values work as-is; change them in the file or in your Docker manager's environment settings. Then start it:
+   Create a `.env` file next to `docker-compose.yml`. Docker Compose reads it automatically. Set `TZ` (for example, `TZ=America/Chicago`), `PLANTS_COOKIE_SECURE` (`true` behind HTTPS, otherwise `false`), and `FORWARDED_ALLOW_IPS` (your proxy IP, or `127.0.0.1` without a proxy). For browser push, also set `PLANTS_VAPID_PUBLIC_KEY`, `PLANTS_VAPID_PRIVATE_KEY`, and `PLANTS_VAPID_SUBJECT`. For photo ID, set `PLANTS_PLANTNET_API_KEY`. Unset optional variables become blank (Compose may warn), leaving those features off. Then start it:
 
    ```sh
    docker compose up -d
@@ -57,7 +57,7 @@ Fresh installs start with one example plant that you can edit or delete.
 
 ### Using a Docker manager
 
-Any tool that accepts a compose file works: paste the compose block above into a new stack in Portainer, Dockhand, CasaOS, Synology Container Manager, or similar, and fill in `TZ` (and the VAPID keys, if you want browser push) in its environment settings. Make sure the `./data` volume points somewhere that is backed up.
+Any tool that accepts a compose file works: paste the block above into a new stack in Portainer, Dockhand, CasaOS, Synology Container Manager, or similar. Set the same variables in its Environment tab instead of a `.env` file. Make sure the `./data` volume points somewhere that is backed up.
 
 ## Features
 
