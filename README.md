@@ -44,7 +44,19 @@ Plants is a simple household plant care log with reminders. It shows what needs 
          - 8653:8000
    ```
 
-   Create a `.env` file next to `docker-compose.yml`. Docker Compose reads it automatically. Set `TZ` (for example, `TZ=America/Chicago`), `PLANTS_COOKIE_SECURE` (`true` behind HTTPS, otherwise `false`), and `FORWARDED_ALLOW_IPS` (your proxy IP, or `127.0.0.1` without a proxy). For browser push, also set `PLANTS_VAPID_PUBLIC_KEY`, `PLANTS_VAPID_PRIVATE_KEY`, and `PLANTS_VAPID_SUBJECT`. For photo ID, set `PLANTS_PLANTNET_API_KEY`. Unset optional variables become blank (Compose may warn), leaving those features off. Then start it:
+   Create a `.env` file next to `docker-compose.yml`. Docker Compose reads it automatically. Copy this example and change the values for your setup:
+
+   ```dotenv
+   TZ=UTC
+   PLANTS_COOKIE_SECURE=false
+   FORWARDED_ALLOW_IPS=127.0.0.1
+   PLANTS_VAPID_PUBLIC_KEY=
+   PLANTS_VAPID_PRIVATE_KEY=
+   PLANTS_VAPID_SUBJECT=
+   PLANTS_PLANTNET_API_KEY=
+   ```
+
+   Set `PLANTS_COOKIE_SECURE=true` behind HTTPS and `FORWARDED_ALLOW_IPS` to your reverse proxy's IP. Leave the push and photo ID values blank unless you set up those features below. For push, use your generated VAPID keys and a contact such as `mailto:you@example.com` for `PLANTS_VAPID_SUBJECT`. For photo ID, use your own Pl@ntNet key. Then start it:
 
    ```sh
    docker compose up -d
