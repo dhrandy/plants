@@ -20,6 +20,10 @@ Plants is a simple household plant care log with reminders. It shows what needs 
 
 ![Plant detail with care tasks and timeline](docs/screenshots/plants-detail-blurred.jpg)
 
+**Mobile view** - Plants on a phone.
+
+![Mobile view](docs/screenshots/plants-mobile-blurred.jpg)
+
 ## Quick start
 
 1. Run Plants with Docker, keeping its data in a folder on the host:
