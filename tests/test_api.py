@@ -55,6 +55,70 @@ def test_login_rate_limit(tmp_path):
         assert r.status_code == 429 and "retry-after" in r.headers
 
 
+def test_token_sign_in_session_controls_and_rate_limit(tmp_path, monkeypatch):
+    fresh(tmp_path)
+    with TestClient(main.app) as admin:
+        setup_admin(admin)
+        token = admin.post("/api/tokens", json={"name": "Test sign-in"}).json()["token"]
+        assert admin.post("/api/users", json={"username": "member-test", "password": "password-456"}).status_code == 200
+    with TestClient(main.app) as member:
+        assert member.post("/api/login", json={"username": "member-test", "password": "password-456"}).status_code == 200
+        member_token = member.post("/api/tokens", json={"name": "Member sign-in"}).json()["token"]
+
+    with TestClient(main.app) as c:
+        assert c.post("/api/login", json={"token": token}).status_code == 200
+        assert c.get("/api/me").json()["username"] == "admin-test"
+        assert c.get("/api/settings").status_code == 200
+        assert c.post("/api/logout").status_code == 200
+        assert c.get("/api/me").status_code == 401
+        assert c.post("/api/login", json={"token": member_token}).status_code == 200
+        assert c.get("/api/me").json()["username"] == "member-test"
+        assert c.put("/api/settings", json={"app_name": "No"}).status_code == 403
+        assert c.post("/api/logout").status_code == 200
+        assert c.post("/api/login", json={"token": token, "username": "admin-test"}).status_code == 401
+        assert c.post("/api/login", json={"token": member_token, "password": "password-456"}).status_code == 401
+
+    # Matching uses constant-time digest comparisons, not the SQL equality shortcut.
+    calls = []
+    compare = main.hmac.compare_digest
+    def record_compare(left, right):
+        calls.append((left, right))
+        return compare(left, right)
+    monkeypatch.setattr(main.hmac, "compare_digest", record_compare)
+    main._login_failures.clear()
+    with TestClient(main.app) as c:
+        assert c.post("/api/login", json={"token": token}).status_code == 200
+        assert len(calls) == 2
+        calls.clear()
+        assert c.post("/api/login", json={"token": "pla_wrong"}).status_code == 401
+        assert len(calls) == 2
+        assert token not in str(c.post("/api/login", json={"token": "pla_wrong"}).json())
+        for _ in range(3):
+            assert c.post("/api/login", json={"username": "admin-test", "password": "wrong-pass"}).status_code == 401
+        blocked = c.post("/api/login", json={"token": token})
+        assert blocked.status_code == 429 and "retry-after" in blocked.headers
+
+    main._login_failures.clear()
+    with TestClient(main.app) as admin:
+        assert admin.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        assert admin.put("/api/settings", json={"feature_token_login": False}).json()["feature_token_login"] is False
+        assert admin.get("/api/status").json()["token_login_enabled"] is False
+        admin.post("/api/logout")
+        assert admin.post("/api/login", json={"token": token}).status_code == 401
+        assert admin.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        admin.put("/api/settings", json={"feature_token_login": True})
+        tokens = admin.get("/api/tokens").json()
+        token_id = next(t["id"] for t in tokens if t["name"] == "Test sign-in")
+        assert admin.delete(f"/api/tokens/{token_id}").status_code == 200
+        admin.post("/api/logout")
+        assert admin.post("/api/login", json={"token": token}).status_code == 401
+        assert admin.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        user = next(u for u in admin.get("/api/users").json() if u["username"] == "member-test")
+        assert admin.put(f"/api/users/{user['id']}", json={"active": False}).status_code == 200
+        admin.post("/api/logout")
+        assert admin.post("/api/login", json={"token": member_token}).status_code == 401
+
+
 def test_due_logic_done_skip_snooze_and_backdate(tmp_path):
     fresh(tmp_path)
     with TestClient(main.app) as c:

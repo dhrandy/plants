@@ -101,7 +101,7 @@ def test_core_flow_and_layout(app_url, width, height):
         expect(page.get_by_role("heading", name=f"Snake {width}")).to_be_visible()
         expect(page.locator(".notes")).to_contain_text("overwater")
         # settings renders, weather card handles offline
-        page.get_by_role("link", name="Settings").click()
+        page.get_by_role("link", name="Settings", exact=True).click()
         expect(page.get_by_role("heading", name="Weather location")).to_be_visible()
         # push section explains why it's off when the server has no VAPID keys
         expect(page.get_by_role("heading", name="Push notifications")).to_be_visible()
@@ -308,4 +308,38 @@ def test_quick_link_growth_and_snooze_ui(app_url, width, height):
         page.evaluate("async () => fetch('/api/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({feature_growth_timeline:true})})")
         assert page.evaluate("document.documentElement.scrollWidth") <= width
         assert errors == []
+        browser.close()
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_api_token_sign_in_ui(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.get_by_role("link", name="Settings", exact=True).click()
+        token = page.evaluate("""async () => {
+            const response = await fetch('/api/tokens', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: 'Browser sign-in test'})
+            });
+            return (await response.json()).token;
+        }""")
+        page.get_by_role("button", name="Sign out").click()
+        page.get_by_role("button", name="Use API token").click()
+        expect(page.locator("#token")).to_be_visible()
+        page.screenshot(path=f"/tmp/plants-token-login-{width}.png", full_page=True)
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        page.locator("#token").fill(token)
+        page.locator("#auth-form button[type=submit]").click()
+        expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
+        page.get_by_role("link", name="Settings", exact=True).click()
+        page.locator('[data-feature="token_login"]').uncheck()
+        page.get_by_role("button", name="Sign out").click()
+        expect(page.get_by_role("button", name="Use API token")).to_have_count(0)
+        page.locator("[name=username]").fill("admin-test")
+        page.locator("[name=password]").fill("password-123")
+        page.locator("#auth-form button[type=submit]").click()
+        expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
+        page.get_by_role("link", name="Settings", exact=True).click()
+        page.locator('[data-feature="token_login"]').check()
         browser.close()

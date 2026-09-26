@@ -90,7 +90,7 @@ _api_lock = threading.Lock()
 _weather_cache: dict[str, Any] = {}
 _weather_lock = threading.Lock()
 
-app = FastAPI(title="Plants", version="0.1.0", docs_url=None, openapi_url=None)
+app = FastAPI(title="Plants", version="0.2.0", docs_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------- helpers
@@ -466,12 +466,33 @@ class Credentials(BaseModel):
     password: str = Field(max_length=200)
 
 
+class LoginCredentials(BaseModel):
+    username: str = Field(default="", max_length=40)
+    password: str = Field(default="", max_length=200)
+    token: str = Field(default="", max_length=200)
+
+
+def token_owner(raw: str) -> sqlite3.Row | None:
+    """Compare all active token hashes without early exit or variable-time equality."""
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    owner_id = None
+    with db() as c:
+        for token in c.execute("SELECT token_hash, created_by FROM api_tokens WHERE revoked=0"):
+            if hmac.compare_digest(digest, token["token_hash"]):
+                owner_id = token["created_by"]
+        if owner_id is None:
+            return None
+        return c.execute("SELECT * FROM users WHERE id=? AND active=1", (owner_id,)).fetchone()
+
+
 @app.get("/api/status")
 def status():
     with db() as c:
         setup_required = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         name = get_setting(c, "app_name", "Your Plants")
-    return {"setup_required": setup_required, "app_name": name}
+        token_login_enabled = get_setting(c, "feature_token_login", "1") == "1"
+    return {"setup_required": setup_required, "app_name": name,
+            "token_login_enabled": token_login_enabled}
 
 
 @app.post("/api/setup")
@@ -491,20 +512,27 @@ def setup(body: Credentials, response: Response):
 
 
 @app.post("/api/login")
-def login(body: Credentials, request: Request, response: Response):
+def login(body: LoginCredentials, request: Request, response: Response):
     ip = client_ip(request)
     retry = login_retry_after(ip)
     if retry:
         raise HTTPException(
             429, "Too many login attempts. Try again later.", headers={"Retry-After": str(retry)}
         )
-    with db() as c:
-        row = c.execute(
-            "SELECT * FROM users WHERE username=? COLLATE NOCASE", (body.username.strip(),)
-        ).fetchone()
-    if not row or not row["active"] or not verify_password(body.password, row["password_hash"], row["salt"]):
+    if body.token:
+        with db() as c:
+            enabled = get_setting(c, "feature_token_login", "1") == "1"
+        row = token_owner(body.token) if enabled and not (body.username or body.password) else None
+    else:
+        with db() as c:
+            row = c.execute(
+                "SELECT * FROM users WHERE username=? COLLATE NOCASE", (body.username.strip(),)
+            ).fetchone()
+        if not row or not row["active"] or not verify_password(body.password, row["password_hash"], row["salt"]):
+            row = None
+    if not row:
         record_login_failure(ip)
-        raise HTTPException(401, "Invalid username or password")
+        raise HTTPException(401, "Invalid sign-in credentials")
     clear_login_failures(ip)
     set_session(response, row["id"])
     return {"user": public_user(row)}
@@ -710,7 +738,7 @@ def apply_care(c, task, action: str, user_id: int, when: str | None = None, days
 
 # ---------------------------------------------------------------- optional features
 
-FEATURES = ("growth_timeline", "quick_links", "care_suggestions")
+FEATURES = ("growth_timeline", "quick_links", "care_suggestions", "token_login")
 
 
 def feature_on(c, name: str) -> bool:
@@ -1722,6 +1750,7 @@ SETTINGS_DEFAULTS = {
     "feature_growth_timeline": "1",
     "feature_quick_links": "1",
     "feature_care_suggestions": "1",
+    "feature_token_login": "1",
 }
 
 
@@ -1746,6 +1775,7 @@ class SettingsIn(BaseModel):
     feature_growth_timeline: bool | None = None
     feature_quick_links: bool | None = None
     feature_care_suggestions: bool | None = None
+    feature_token_login: bool | None = None
 
     @field_validator("winter_months")
     @classmethod

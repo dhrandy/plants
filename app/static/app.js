@@ -105,26 +105,34 @@ async function showAuth() {
   $("#top").hidden = true;
   const status = await api("/api/status", { allow401: true });
   const setup = status.setup_required;
-  $("#view").innerHTML = `
-    <form class="card auth stack" id="auth-form">
-      <div class="auth-logo"><img src="/static/icon.svg" alt="" width="40" height="40">${esc(status.app_name)}</div>
-      <h1>${setup ? "Set up Plants" : "Sign in"}</h1>
-      ${setup ? '<p class="muted">Create the first account. It becomes the administrator.</p>' : ""}
-      <div><label for="username">Username</label><input id="username" name="username" autocomplete="username" required></div>
-      <div><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required minlength="8"></div>
-      <p class="error" id="auth-error"></p>
-      <button class="primary" type="submit">${setup ? "Create administrator" : "Sign in"}</button>
-    </form>`;
-  $("#auth-form").onsubmit = async (e) => {
-    e.preventDefault();
-    const body = { username: $("#username").value, password: $("#password").value };
-    try {
-      await api(setup ? "/api/setup" : "/api/login", { method: "POST", body, allow401: true });
-      await boot();
-    } catch (err) {
-      $("#auth-error").textContent = err.message;
-    }
+  let useToken = false;
+  const renderForm = () => {
+    $("#view").innerHTML = `
+      <form class="card auth stack" id="auth-form">
+        <div class="auth-logo"><img src="/static/icon.svg" alt="" width="40" height="40">${esc(status.app_name)}</div>
+        <h1>${setup ? "Set up Plants" : "Sign in"}</h1>
+        ${setup ? '<p class="muted">Create the first account. It becomes the administrator.</p>' : ""}
+        ${useToken ? `<div><label for="token">API token</label><input id="token" name="token" type="password" autocomplete="off" required></div>` : `
+          <div><label for="username">Username</label><input id="username" name="username" autocomplete="username" required></div>
+          <div><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required minlength="8"></div>`}
+        <p class="error" id="auth-error"></p>
+        <button class="primary" type="submit">${setup ? "Create administrator" : "Sign in"}</button>
+        ${!setup && status.token_login_enabled ? `<button class="ghost" id="auth-mode" type="button">${useToken ? "Use username and password" : "Use API token"}</button>` : ""}
+      </form>`;
+    if ($("#auth-mode")) $("#auth-mode").onclick = () => { useToken = !useToken; renderForm(); };
+    $("#auth-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const body = useToken ? { token: $("#token").value } :
+        { username: $("#username").value, password: $("#password").value };
+      try {
+        await api(setup ? "/api/setup" : "/api/login", { method: "POST", body, allow401: true });
+        await boot();
+      } catch (err) {
+        $("#auth-error").textContent = err.message;
+      }
+    };
   };
+  renderForm();
 }
 
 $("#logout").onclick = async () => {
@@ -812,6 +820,7 @@ async function renderSettings() {
       <label class="toggle"><input type="checkbox" data-feature="growth_timeline" ${settings.feature_growth_timeline ? "checked" : ""}> Growth timeline <span class="muted">· each plant's photos side by side, oldest first</span></label>
       <label class="toggle"><input type="checkbox" data-feature="care_suggestions" ${settings.feature_care_suggestions ? "checked" : ""}> Care suggestions <span class="muted">· photo ID pre-fills water and fertilize intervals</span></label>
       <label class="toggle"><input type="checkbox" data-feature="quick_links" ${settings.feature_quick_links ? "checked" : ""}> One-tap quick links <span class="muted">· log care from a notification without signing in</span></label>
+      <label class="toggle"><input type="checkbox" data-feature="token_login" ${settings.feature_token_login ? "checked" : ""}> API token sign-in <span class="muted">· sign into the website with an existing API token</span></label>
       <p class="hint" style="margin:0">A quick link can only log or snooze its own task. Set "App address for links" under Notifications so the links in alerts work away from home. If a link ever ends up somewhere it shouldn't, reset them all.</p>
       <div><button class="small" id="ql-reset">Reset all quick links</button></div>
     </section>
