@@ -6,6 +6,20 @@ Plants is in beta. Features, data formats, and the API may change until a stable
 
 Plants is a simple household plant care log with reminders. It shows what needs checking today, lets you tap **Done**, **Snooze**, or **Skip**, and keeps a photo timeline for every plant. You decide what each plant needs; the app just keeps track. It is self-hosted, multi-user, and runs as one Docker container with SQLite storage. No subscriptions, no cloud account, and your data stays on your server.
 
+## Screenshots
+
+**Today view** - upcoming care tasks and the weather at a glance.
+
+![Today view with upcoming plant care tasks](docs/screenshots/plants-today-blurred.jpg)
+
+**Plants grid** - browse plants and see what care is due.
+
+![Plants grid with care status](docs/screenshots/plants-grid-blurred.jpg)
+
+**Plant detail and timeline** - care tasks, photos, and activity for one plant.
+
+![Plant detail with care tasks and timeline](docs/screenshots/plants-detail-blurred.jpg)
+
 ## Quick start
 
 1. Run Plants with Docker, keeping its data in a folder on the host:
