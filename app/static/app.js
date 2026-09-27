@@ -216,9 +216,14 @@ function dueRow(i) {
       <div class="due-meta">${esc([i.room, i.outdoor ? "Outdoor" : ""].filter(Boolean).join(" · "))}${i.room || i.outdoor ? " · " : ""}${esc(i.reason)}</div>
     </div>
     <div class="due-actions">
-      <button class="primary" data-act="done" data-id="${i.task_id}">Done</button>
+      <button class="primary due-done" data-act="done" data-id="${i.task_id}">Done</button>
       <button data-act="snooze" data-id="${i.task_id}" data-plant="${i.plant_id}" data-plantdue="${i.plant_due || 0}" data-name="${esc(i.plant_name)}">Snooze</button>
       <button data-act="skip" data-id="${i.task_id}" title="Checked it, doesn't need it yet">Skip</button>
+    </div>
+    <div class="due-confirm" hidden>
+      <span>Log ${esc(i.label)} for ${esc(i.plant_name)}?</span>
+      <button class="primary" data-confirm-done="${i.task_id}">Yes, log</button>
+      <button data-cancel-done>Cancel</button>
     </div>
   </div>`;
 }
@@ -259,6 +264,10 @@ async function renderToday() {
     <div class="batchbar" id="batchbar" ${state.selected.size ? "" : "hidden"}>
       <b id="batch-count"></b>
       <button class="primary" data-batch="done">Done</button>
+      <span class="batch-confirm" hidden>Log <span id="batch-confirm-count"></span> selected?
+        <button class="primary" data-batch-confirm>Yes, log</button>
+        <button data-batch-cancel>Cancel</button>
+      </span>
       <button data-batch="snooze">Snooze</button>
       <button data-batch="skip">Skip</button>
       <button class="ghost" data-batch="clear">Clear</button>
@@ -278,6 +287,18 @@ async function renderToday() {
   }));
   bindCareButtons($("#view"), renderToday);
   $$("[data-batch]").forEach((b) => (b.onclick = () => batchAction(b.dataset.batch)));
+  $$("[data-confirm-done]").forEach((b) => (b.onclick = () => {
+    b.disabled = true;
+    care(Number(b.dataset.confirmDone), "done", {}, renderToday);
+  }));
+  $$("[data-cancel-done]").forEach((b) => (b.onclick = () => {
+    b.closest(".due-confirm").hidden = true;
+  }));
+  $("[data-batch-confirm]").onclick = (e) => {
+    e.currentTarget.disabled = true;
+    batchAction("done", true);
+  };
+  $("[data-batch-cancel]").onclick = () => { $(".batch-confirm").hidden = true; };
 }
 
 function updateBatchBar() {
@@ -285,10 +306,17 @@ function updateBatchBar() {
   if (!bar) return;
   bar.hidden = state.selected.size === 0;
   $("#batch-count").textContent = `${state.selected.size} selected`;
+  $("#batch-confirm-count").textContent = state.selected.size;
+  $(".batch-confirm").hidden = true;
 }
 
-async function batchAction(action) {
+async function batchAction(action, confirmed = false) {
   if (action === "clear") { state.selected.clear(); return renderToday(); }
+  if (action === "done" && !confirmed) {
+    $("#batch-confirm-count").textContent = state.selected.size;
+    $(".batch-confirm").hidden = false;
+    return;
+  }
   const ids = [...state.selected];
   const run = async (extra = {}) => {
     try {
@@ -296,7 +324,7 @@ async function batchAction(action) {
       state.selected.clear();
       toast(`${ids.length} marked ${action === "done" ? "done" : action === "skip" ? "skipped" : "snoozed"}`);
       renderToday();
-    } catch (err) { fail(err); }
+    } catch (err) { fail(err); $("[data-batch-confirm]").disabled = false; }
   };
   if (action === "snooze") return snoozeMenu((days) => run({ days }));
   run();
@@ -314,6 +342,12 @@ function bindCareButtons(root, after) {
     if (act === "unsnooze") return unsnooze(id, after);
     if (act === "copylink") return copyQuickLink(b.dataset.link);
     if (act === "log") return logCareModal(id, after);
+    if (act === "done" && b.closest(".due")) {
+      const row = b.closest(".due");
+      $$(".due-confirm", root).forEach((panel) => { if (panel !== $(".due-confirm", row)) panel.hidden = true; });
+      $(".due-confirm", row).hidden = false;
+      return;
+    }
     care(id, act, {}, after);
   }));
 }
@@ -323,7 +357,7 @@ async function care(taskId, action, body, after) {
     await api(`/api/tasks/${taskId}/${action}`, { method: "POST", body });
     toast(action === "done" ? "Logged" : action === "skip" ? "Skipped until next cycle" : `Snoozed ${body.days} day${body.days === 1 ? "" : "s"}`);
     await after();
-  } catch (err) { fail(err); }
+  } catch (err) { fail(err); const button = $(`[data-confirm-done="${taskId}"]`); if (button) button.disabled = false; }
 }
 
 async function snoozePlant(plantId, days, after) {

@@ -57,7 +57,7 @@ def sign_in(page, url):
     expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
 
 
-@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844), (280, 650)])
 def test_core_flow_and_layout(app_url, width, height):
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -80,8 +80,25 @@ def test_core_flow_and_layout(app_url, width, height):
         assert width > 650 or box["height"] >= 44
         assert page.evaluate("document.documentElement.scrollWidth") <= width
         row.get_by_role("button", name="Done").click()
+        expect(row.locator(".due-confirm")).to_be_visible()
+        assert page.locator(".timeline").count() == 0
+        expect(row).to_contain_text("overdue")
+        row.get_by_role("button", name="Cancel").click()
+        expect(row.locator(".due-confirm")).to_be_hidden()
+        row.get_by_role("button", name="Done").click()
+        page.screenshot(path=f"/tmp/plants-done-confirm-{width}.png", full_page=True)
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        row.get_by_role("button", name="Yes, log").click()
         expect(page.locator(".toast")).to_contain_text("Logged")
         expect(page.locator(".due", has_text=f"Browser fern {width}")).to_contain_text("In 3 days")
+        # Batch Done also waits for a second, explicit tap.
+        page.locator(".due", has_text=f"Browser fern {width}").first.locator("[data-select]").check()
+        page.locator("[data-batch=done]").click()
+        expect(page.locator(".batch-confirm")).to_be_visible()
+        expect(page.locator(".due", has_text=f"Browser fern {width}").first).to_contain_text("In 3 days")
+        page.locator("[data-batch-cancel]").click()
+        expect(page.locator(".batch-confirm")).to_be_hidden()
+        page.locator("[data-batch=clear]").click()
         # plants list and detail
         page.get_by_role("link", name="Plants", exact=True).click()
         page.locator(".plant-card", has_text=f"Browser fern {width}").first.click()

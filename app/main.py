@@ -90,7 +90,7 @@ _api_lock = threading.Lock()
 _weather_cache: dict[str, Any] = {}
 _weather_lock = threading.Lock()
 
-app = FastAPI(title="Plants", version="0.3.1", docs_url=None, openapi_url=None)
+app = FastAPI(title="Plants", version="0.3.2", docs_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------- helpers

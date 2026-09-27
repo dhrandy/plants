@@ -249,3 +249,19 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent2); b
   .wx-temp { font-size: 34px; }
   .wx-day { font-size: 11px; }
 }
+
+/* A deliberate second tap on Today prevents an accidental care log. */
+.due-done { padding-inline: 10px; min-width: 64px; }
+.due-confirm {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border-top: 1px solid var(--line); padding-top: 8px; font-size: 14px;
+}
+.due-confirm span { flex: 1 1 100px; }
+.batch-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.due-confirm[hidden], .batch-confirm[hidden] { display: none; }
+@media (max-width: 650px) {
+  .due-actions { display: flex; flex-wrap: wrap; }
+  .due-actions button { flex: 0 0 auto; min-height: 44px; }
+  .due-confirm span { flex-basis: 100%; }
+  .due-confirm button { min-height: 44px; }
+}
