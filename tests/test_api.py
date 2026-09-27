@@ -75,7 +75,7 @@ def test_token_sign_in_session_controls_and_rate_limit(tmp_path, monkeypatch):
         assert c.post("/api/login", json={"username": "admin-test", "password": token}).status_code == 401
         assert c.post("/api/login", json={"username": "", "password": "pla_wrong"}).status_code == 401
         assert c.post("/api/login", json={"username": "", "password": token}).status_code == 200
-        assert c.get("/api/settings").status_code == 200
+        assert c.get("/api/settings").status_code == 403
         assert c.post("/api/logout").status_code == 200
         assert c.get("/api/me").status_code == 401
         assert c.post("/api/login", json={"token": member_token}).status_code == 200
@@ -211,6 +211,136 @@ def test_tokens_v1_api_and_attribution(tmp_path):
         assert "items" in c.get("/api/v1/due?days=30", headers=h).json()
         assert "/api/v1/plants" in c.get("/api/openapi.json").json()["paths"]
         assert "/api/plants" not in c.get("/api/openapi.json").json()["paths"]
+
+
+def test_token_session_scope(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        admin_token = c.post("/api/tokens", json={"name": "Admin token"}).json()["token"]
+        assert c.post("/api/users", json={"username": "member-test", "password": "password-456"}).status_code == 200
+        assert c.get("/api/settings").status_code == 200
+        assert c.get("/api/export").status_code == 200
+    with TestClient(main.app) as m:
+        assert m.post("/api/login", json={"username": "member-test", "password": "password-456"}).status_code == 200
+        member_token = m.post("/api/tokens", json={"name": "Member token"}).json()["token"]
+
+    with TestClient(main.app) as c:
+        # The bearer API is untouched: the same token still drives /api/v1 directly.
+        h = {"Authorization": f"Bearer {admin_token}"}
+        assert c.get("/api/v1/plants", headers=h).status_code == 200
+        assert c.get("/api/v1/due", headers=h).status_code == 200
+
+        # Signing in with the token gives a session that knows it is limited.
+        r = c.post("/api/login", json={"token": admin_token})
+        assert r.status_code == 200 and r.json()["token_session"] is True
+        me = c.get("/api/me").json()
+        assert me["username"] == "admin-test" and me["token_session"] is True
+
+        # Allowed: exactly what the v1 token API can do.
+        new = c.post("/api/plants", json={
+            "name": "Token fern", "species": "Nephrolepis", "room": "Porch",
+            "tasks": [{"kind": "water", "interval_days": 5, "last_done": days_ago(6)}]})
+        assert new.status_code == 201
+        pid = new.json()["id"]
+        tid = new.json()["tasks"][0]["id"]
+        assert c.get("/api/plants").status_code == 200
+        assert c.get(f"/api/plants/{pid}").status_code == 200
+        assert c.put(f"/api/plants/{pid}", json={"name": "Token fern", "species": "Nephrolepis",
+                                                "light": "Low", "tasks": []}).status_code == 200
+        assert c.post(f"/api/plants/{pid}/tasks", json={"kind": "mist", "interval_days": 3}).status_code == 201
+        assert c.post(f"/api/tasks/{tid}/done", json={}).status_code == 200
+        assert c.post(f"/api/tasks/{tid}/snooze", json={"days": 2}).status_code == 200
+        assert c.post(f"/api/tasks/{tid}/unsnooze").status_code == 200
+        assert c.post(f"/api/plants/{pid}/snooze", json={"days": 1}).status_code in (200, 400)
+        assert c.post("/api/care/batch", json={"task_ids": [tid], "action": "done"}).status_code == 200
+        assert c.get("/api/due").status_code == 200
+        assert c.get("/api/rooms").status_code == 200
+        assert c.get("/api/library").status_code == 200
+        assert c.get("/api/care-suggestion?species=fern").status_code == 200
+        ev = c.post(f"/api/plants/{pid}/events", data={"note": "From a token session"}).status_code == 201
+        assert ev
+
+        # Denied: everything beyond the bearer surface, even for an admin-owned token.
+        for method, url, payload in [
+            ("GET", "/api/settings", None),
+            ("PUT", "/api/settings", {"app_name": "No"}),
+            ("GET", "/api/notifications", None),
+            ("PUT", "/api/notifications", {"notify_urls": "", "notify_mode": "digest", "notify_hour": "8",
+                                           "quiet_start": "21", "quiet_end": "8", "overdue_repeat_days": "2"}),
+            ("POST", "/api/notifications/test", None),
+            ("GET", "/api/export", None),
+            ("POST", "/api/import", {"app": "plants", "tables": {}}),
+            ("GET", "/api/users", None),
+            ("POST", "/api/users", {"username": "sneaky", "password": "password-789"}),
+            ("GET", "/api/tokens", None),
+            ("POST", "/api/tokens", {"name": "spawned"}),
+            ("DELETE", "/api/tokens/1", None),
+            ("PUT", f"/api/tasks/{tid}", {"kind": "water", "interval_days": 1}),
+            ("DELETE", f"/api/tasks/{tid}", None),
+            ("DELETE", f"/api/plants/{pid}", None),
+            ("DELETE", "/api/events/1", None),
+            ("GET", f"/api/plants/{pid}/events", None),
+            ("GET", "/api/photos/nope.png", None),
+            ("GET", "/api/weather", None),
+            ("GET", "/api/weather/search?q=concord", None),
+            ("GET", "/api/identify", None),
+            ("GET", "/api/push", None),
+            ("POST", "/api/quick-links/reset", None),
+            ("POST", "/api/rooms", {"name": "Attic"}),
+            ("POST", f"/api/plants/{pid}/duplicate", None),
+        ]:
+            r = c.request(method, url, json=payload) if payload is not None else c.request(method, url)
+            assert r.status_code == 403, f"{method} {url} gave {r.status_code}"
+            assert "token" in r.json()["detail"].lower()
+
+        # Bearer use of the same token keeps working while its session is limited.
+        assert c.get("/api/v1/plants", headers=h).status_code == 200
+        c.post("/api/logout")
+
+        # A member-owned token gets the same limits, and still no admin routes.
+        assert c.post("/api/login", json={"token": member_token}).status_code == 200
+        assert c.get("/api/me").json()["token_session"] is True
+        assert c.get("/api/plants").status_code == 200
+        assert c.get("/api/settings").status_code == 403
+        assert c.get("/api/export").status_code == 403
+        assert c.get("/api/notifications").status_code == 403
+        assert c.put("/api/settings", json={"app_name": "No"}).status_code == 403
+        c.post("/api/logout")
+
+        # A password sign-in keeps full access.
+        assert c.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        assert c.get("/api/me").json()["token_session"] is False
+        assert c.get("/api/settings").status_code == 200
+        assert c.get("/api/export").status_code == 200
+        # The settings surface returns token metadata only, never token values.
+        listed = c.get("/api/tokens").json()
+        assert listed and all("token" not in t and t["prefix"].startswith("pla_") for t in listed)
+
+
+def test_session_migration_scopes_and_clears_old_sessions(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/me").json()["token_session"] is False
+        with main.db() as db:
+            # Simulate a volume from before token sign-in was scoped.
+            db.execute("ALTER TABLE sessions RENAME TO sessions_old")
+            db.execute("""CREATE TABLE sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL)""")
+            db.execute("""INSERT INTO sessions(token_hash,user_id,expires_at,created_at)
+                SELECT token_hash,user_id,expires_at,created_at FROM sessions_old""")
+            db.execute("DROP TABLE sessions_old")
+        main.init_db()
+        # Old sessions are dropped rather than trusted, and the column exists for new ones.
+        assert c.get("/api/me").status_code == 401
+        with main.db() as db:
+            assert "via_token" in {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+        assert c.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        assert c.get("/api/me").json()["token_session"] is False
 
 
 def test_members_and_permissions(tmp_path):

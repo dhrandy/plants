@@ -73,7 +73,7 @@ function whenText(days) {
 }
 
 function thumb(photo, name, href) {
-  const inner = photo ? `<img src="${esc(photo)}" alt="" loading="lazy">` : "🪴";
+  const inner = photo && !(state.me && state.me.token_session) ? `<img src="${esc(photo)}" alt="" loading="lazy">` : "🪴";
   return href ? `<a class="thumb" href="${href}" aria-label="${esc(name)}">${inner}</a>` : `<span class="thumb">${inner}</span>`;
 }
 
@@ -148,11 +148,20 @@ async function boot() {
   } catch {
     return showAuth();
   }
-  state.settings = await api("/api/settings");
+  if (state.me.token_session) {
+    // API-token sign-in: limited to what the token API can do, so Settings stays out of reach.
+    state.settings = null;
+    const status = await api("/api/status");
+    $("#app-name").textContent = status.app_name;
+    document.title = status.app_name;
+  } else {
+    state.settings = await api("/api/settings");
+    $("#app-name").textContent = state.settings.app_name;
+    document.title = state.settings.app_name;
+  }
   $("#top").hidden = false;
-  $("#app-name").textContent = state.settings.app_name;
-  document.title = state.settings.app_name;
-  $("#user-badge").textContent = state.me.username;
+  $("#user-badge").textContent = state.me.username + (state.me.token_session ? " (token)" : "");
+  $$(".tab").forEach((t) => { t.hidden = state.me.token_session && t.dataset.tab === "settings"; });
   route();
 }
 
@@ -456,7 +465,11 @@ async function renderPlants() {
 // ---------------------------------------------------------------- plant detail
 
 async function renderPlant(id) {
-  const [p, events] = await Promise.all([api(`/api/plants/${id}`), api(`/api/plants/${id}/events`)]);
+  const limited = state.me && state.me.token_session;
+  const [p, events] = await Promise.all([
+    api(`/api/plants/${id}`),
+    limited ? Promise.resolve([]) : api(`/api/plants/${id}/events`),
+  ]);
   const facts = [
     ["Species", p.species], ["Room", p.room], ["Light", p.light], ["Pot", [p.pot_size, p.pot_material].filter(Boolean).join(", ")],
     ["Acquired", fmtDate(p.acquired)], ["Where", p.outdoor ? "Outdoor" : "Indoor"], ["Added by", p.added_by],
@@ -467,7 +480,7 @@ async function renderPlant(id) {
   const growth = feature("growth_timeline");
   $("#view").innerHTML = `
     <div class="hero">
-      <div class="hero-photo">${p.photo ? `<img src="${esc(p.photo)}" alt="${esc(p.name)}">` : "🪴"}</div>
+      <div class="hero-photo">${p.photo && !limited ? `<img src="${esc(p.photo)}" alt="${esc(p.name)}">` : "🪴"}</div>
       <div>
         <p><a href="#/plants">← All plants</a></p>
         <h1>${esc(p.name)}</h1>
@@ -475,7 +488,7 @@ async function renderPlant(id) {
         <div class="row">
           <button id="edit-plant">Edit</button>
           <button id="add-photo">Add photo or note</button>
-          <button id="dup-plant">Duplicate</button>
+          ${limited ? "" : '<button id="dup-plant">Duplicate</button>'}
           ${dueNow ? `<button id="snooze-plant">Snooze plant</button>` : ""}
         </div>
       </div>
@@ -501,7 +514,7 @@ async function renderPlant(id) {
               : `<button data-act="snooze" data-id="${t.id}" data-plant="${p.id}" data-plantdue="${t.days <= 0 ? dueNow : 0}" data-name="${esc(p.name)}">Snooze</button>`}
             <button data-act="skip" data-id="${t.id}">Skip</button>
             ${t.quick_links ? `<button class="ghost" data-act="copylink" data-link="${esc(t.quick_links.done)}" title="One-tap link for a text message">Copy link</button>` : ""}
-            <button class="ghost" data-edit-task="${t.id}" aria-label="Edit ${esc(t.label)} task">Edit</button>
+            ${limited ? "" : `<button class="ghost" data-edit-task="${t.id}" aria-label="Edit ${esc(t.label)} task">Edit</button>`}
           </div>
         </div>`).join("") : '<p class="muted">No care tasks yet.</p>'}</div>
     </section>
@@ -529,7 +542,7 @@ async function renderPlant(id) {
           <button class="icon-btn ghost danger" data-del-event="${e.id}" aria-label="Delete entry">✕</button></li>`).join("")}</ul>`
         : '<p class="muted">Care you log and photos you add show up here.</p>'}
     </section>
-    <p><button class="danger" id="delete-plant">Delete plant</button></p>`;
+    ${limited ? "" : '<p><button class="danger" id="delete-plant">Delete plant</button></p>'}`;
   const again = () => renderPlant(id);
   bindCareButtons($("#view"), again);
   $("#edit-plant").onclick = () => plantForm(p);
@@ -538,7 +551,7 @@ async function renderPlant(id) {
   $$("[data-edit-task]").forEach((b) => (b.onclick = () => taskForm(p, p.tasks.find((t) => t.id === Number(b.dataset.editTask)), again)));
   if ($("#snooze-plant")) $("#snooze-plant").onclick = () => snoozeMenu((days) => snoozePlant(id, days, again));
   $$("[data-growth]").forEach((b) => (b.onclick = () => growthViewer(p, photos, Number(b.dataset.growth))));
-  $("#dup-plant").onclick = async () => {
+  if ($("#dup-plant")) $("#dup-plant").onclick = async () => {
     try {
       const copy = await api(`/api/plants/${id}/duplicate`, { method: "POST" });
       toast("Duplicated");
@@ -552,7 +565,7 @@ async function renderPlant(id) {
     if (!confirm("Delete this timeline entry?")) return;
     try { await api(`/api/events/${b.dataset.delEvent}`, { method: "DELETE" }); toast("Entry deleted"); again(); } catch (err) { fail(err); }
   }));
-  $("#delete-plant").onclick = async () => {
+  if ($("#delete-plant")) $("#delete-plant").onclick = async () => {
     if (!confirm(`Delete ${p.name} and its whole history and photos?`)) return;
     try { await api(`/api/plants/${id}`, { method: "DELETE" }); toast("Plant deleted"); location.hash = "#/plants"; } catch (err) { fail(err); }
   };
@@ -835,6 +848,12 @@ function photoModal(p, after) {
 // ---------------------------------------------------------------- settings
 
 async function renderSettings() {
+  if (state.me && state.me.token_session) {
+    $("#view").innerHTML = `<section class="card stack"><h1 style="margin-top:0">Settings</h1>
+      <p class="muted">You're signed in with an API token. This session can only do what the token API can -
+      settings, notifications, users, tokens and backups need a username-and-password sign-in.</p></section>`;
+    return;
+  }
   const admin = state.me.is_admin;
   const [settings, rooms, tokens, notify, users] = await Promise.all([
     api("/api/settings"), api("/api/rooms"), api("/api/tokens"),

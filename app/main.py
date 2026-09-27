@@ -90,7 +90,7 @@ _api_lock = threading.Lock()
 _weather_cache: dict[str, Any] = {}
 _weather_lock = threading.Lock()
 
-app = FastAPI(title="Plants", version="0.3.2", docs_url=None, openapi_url=None)
+app = FastAPI(title="Plants", version="0.3.3", docs_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------- helpers
@@ -230,7 +230,8 @@ def init_db() -> None:
           token_hash TEXT PRIMARY KEY,
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           expires_at TEXT NOT NULL,
-          created_at TEXT NOT NULL
+          created_at TEXT NOT NULL,
+          via_token INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS api_tokens (
           id INTEGER PRIMARY KEY,
@@ -313,6 +314,11 @@ def init_db() -> None:
         # Existing SQLite volumes gain Info without replacing or editing care notes.
         if "info" not in {row[1] for row in c.execute("PRAGMA table_info(plants)")}:
             c.execute("ALTER TABLE plants ADD COLUMN info TEXT NOT NULL DEFAULT ''")
+        # Sessions created before token sign-in was scoped can't be told apart, so
+        # everyone signs in again once rather than letting an old token session keep full access.
+        if "via_token" not in {row[1] for row in c.execute("PRAGMA table_info(sessions)")}:
+            c.execute("ALTER TABLE sessions ADD COLUMN via_token INTEGER NOT NULL DEFAULT 0")
+            c.execute("DELETE FROM sessions")
         if fresh:
             seed_example(c)
 
@@ -389,31 +395,66 @@ def public_user(row) -> dict[str, Any]:
     }
 
 
+# A session started by signing in with an API token may only do what the bearer
+# token API (v1) can do: read plants and rooms, add plants and tasks, log care,
+# snooze, and add photos. Settings, users, tokens, notifications, backup, push,
+# weather, photo reads, timelines, interval edits, and deletes all need a
+# username-and-password sign-in. Anything not listed here is denied by default.
+TOKEN_SESSION_ALLOWED = (
+    ("GET", re.compile(r"/api/me")),
+    ("GET", re.compile(r"/api/plants")),
+    ("POST", re.compile(r"/api/plants")),
+    ("GET", re.compile(r"/api/plants/\d+")),
+    ("PUT", re.compile(r"/api/plants/\d+")),
+    ("POST", re.compile(r"/api/plants/\d+/tasks")),
+    ("POST", re.compile(r"/api/plants/\d+/events")),
+    ("POST", re.compile(r"/api/plants/\d+/main-photo")),
+    ("POST", re.compile(r"/api/plants/\d+/snooze")),
+    ("POST", re.compile(r"/api/tasks/\d+/(done|skip|snooze|unsnooze)")),
+    ("POST", re.compile(r"/api/care/batch")),
+    ("GET", re.compile(r"/api/due")),
+    ("GET", re.compile(r"/api/rooms")),
+    ("GET", re.compile(r"/api/library")),
+    ("GET", re.compile(r"/api/care-suggestion")),
+)
+
+
+def token_session_allowed(request: Request) -> bool:
+    path = request.url.path.rstrip("/") or "/"
+    return any(method == request.method and pattern.fullmatch(path) for method, pattern in TOKEN_SESSION_ALLOWED)
+
+
 def current_user(request: Request, admin: bool = False) -> sqlite3.Row:
     token = request.cookies.get(COOKIE)
     if not token:
         raise HTTPException(401, "Not signed in")
     with db() as c:
         row = c.execute(
-            """SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id
+            """SELECT u.*, s.via_token AS token_session FROM sessions s JOIN users u ON u.id=s.user_id
             WHERE s.token_hash=? AND s.expires_at>? AND u.active=1""",
             (hashlib.sha256(token.encode()).hexdigest(), now_iso()),
         ).fetchone()
     if not row:
         raise HTTPException(401, "Session expired")
+    if row["token_session"] and not token_session_allowed(request):
+        raise HTTPException(
+            403,
+            "This session is signed in with an API token and is limited to what the token API can do. "
+            "Sign in with a username and password for full access.",
+        )
     if admin and not row["is_admin"]:
         raise HTTPException(403, "Administrator access required")
     return row
 
 
-def set_session(response: Response, user_id: int) -> None:
+def set_session(response: Response, user_id: int, via_token: bool = False) -> None:
     raw = secrets.token_urlsafe(32)
     expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
     with db() as c:
         c.execute("DELETE FROM sessions WHERE expires_at<=?", (now_iso(),))
         c.execute(
-            "INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)",
-            (hashlib.sha256(raw.encode()).hexdigest(), user_id, expires.isoformat(), now_iso()),
+            "INSERT INTO sessions(token_hash,user_id,expires_at,created_at,via_token) VALUES(?,?,?,?,?)",
+            (hashlib.sha256(raw.encode()).hexdigest(), user_id, expires.isoformat(), now_iso(), int(via_token)),
         )
     response.set_cookie(
         COOKIE,
@@ -539,8 +580,8 @@ def login(body: LoginCredentials, request: Request, response: Response):
         record_login_failure(ip)
         raise HTTPException(401, "Invalid sign-in credentials")
     clear_login_failures(ip)
-    set_session(response, row["id"])
-    return {"user": public_user(row)}
+    set_session(response, row["id"], via_token=bool(token_value))
+    return {"user": public_user(row), "token_session": bool(token_value)}
 
 
 @app.post("/api/logout")
@@ -555,7 +596,8 @@ def logout(request: Request, response: Response):
 
 @app.get("/api/me")
 def me(request: Request):
-    return public_user(current_user(request))
+    user = current_user(request)
+    return {**public_user(user), "token_session": bool(user["token_session"])}
 
 
 # ---------------------------------------------------------------- scheduling logic

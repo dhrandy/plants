@@ -365,6 +365,18 @@ def test_api_token_sign_in_ui(app_url, width, height):
         page.locator("#password").fill(token)
         page.locator("#auth-form button[type=submit]").click()
         expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
+        # A token session is limited: no Settings tab, and the badge says so.
+        expect(page.get_by_role("link", name="Settings", exact=True)).to_have_count(0)
+        expect(page.locator("#user-badge")).to_contain_text("(token)")
+        page.goto(f"{app_url}/#/settings")
+        expect(page.locator("#view")).to_contain_text("signed in with an API token")
+        page.screenshot(path=f"/tmp/plants-v033-token-limited-{width}.png", full_page=True)
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        page.get_by_role("button", name="Sign out").click()
+        page.locator("#username").fill("admin-test")
+        page.locator("#password").fill("password-123")
+        page.locator("#auth-form button[type=submit]").click()
+        expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
         page.get_by_role("link", name="Settings", exact=True).click()
         page.locator('[data-feature="token_login"]').uncheck()
         page.get_by_role("button", name="Sign out").click()
