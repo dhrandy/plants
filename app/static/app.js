@@ -449,6 +449,9 @@ async function renderPlant(id) {
         </div>
       </div>
     </div>
+    ${feature("plant_info") ? `<section class="card settings-section"><h2 style="margin-top:0">Info</h2>
+      ${p.info ? `<div class="notes">${esc(p.info)}</div>` : `<p class="muted">No info yet. Edit this plant to add some.</p>`}
+    </section>` : ""}
     ${p.notes || p.care_source ? `<section class="card settings-section"><h2 style="margin-top:0">Care notes</h2>
       ${p.notes ? `<div class="notes">${esc(p.notes)}</div>` : ""}
       ${p.care_source ? `<p class="hint">Source: <a href="${esc(p.care_source)}" target="_blank" rel="noopener">${esc(p.care_source.replace(/^https?:\/\//, "").split("/")[0])}</a></p>` : ""}
@@ -614,6 +617,7 @@ async function plantForm(p) {
         <div><label for="f-mat">Pot material</label><input id="f-mat" name="pot_material" maxlength="40" value="${esc(p?.pot_material)}" placeholder="Terracotta"></div>
         <div><label for="f-acq">Acquired</label><input id="f-acq" name="acquired" type="date" value="${esc(p?.acquired)}"></div>
         <div><label>&nbsp;</label><label class="toggle"><input type="checkbox" name="outdoor" ${p?.outdoor ? "checked" : ""}> Outdoor plant</label></div>
+        ${feature("plant_info") ? `<div class="full"><label for="f-info">Info</label><textarea id="f-info" name="info" maxlength="4000" placeholder="What this plant is, where it came from, and anything worth remembering">${esc(p?.info)}</textarea></div>` : ""}
         <div class="full"><label for="f-notes">Care notes</label><textarea id="f-notes" name="notes" maxlength="4000">${esc(p?.notes)}</textarea></div>
         <div class="full"><label for="f-src">Care source link (optional)</label><input id="f-src" name="care_source" type="url" maxlength="300" value="${esc(p?.care_source)}" placeholder="https://"></div>
       </div>
@@ -705,6 +709,7 @@ async function plantForm(p) {
         name: form.name.value, species: form.species.value, room: form.room.value, light: form.light.value,
         pot_size: form.pot_size.value, pot_material: form.pot_material.value, acquired: form.acquired.value || null,
         outdoor: form.outdoor.checked, notes: form.notes.value, care_source: form.care_source.value,
+        ...(feature("plant_info") ? { info: form.info.value } : {}),
       };
       if (isNew) {
         body.tasks = $$(".task-edit", sheet).map((r) => ({
@@ -820,6 +825,7 @@ async function renderSettings() {
       <label class="toggle"><input type="checkbox" data-feature="growth_timeline" ${settings.feature_growth_timeline ? "checked" : ""}> Growth timeline <span class="muted">· each plant's photos side by side, oldest first</span></label>
       <label class="toggle"><input type="checkbox" data-feature="care_suggestions" ${settings.feature_care_suggestions ? "checked" : ""}> Care suggestions <span class="muted">· photo ID pre-fills water and fertilize intervals</span></label>
       <label class="toggle"><input type="checkbox" data-feature="quick_links" ${settings.feature_quick_links ? "checked" : ""}> One-tap quick links <span class="muted">· log care from a notification without signing in</span></label>
+      <label class="toggle"><input type="checkbox" data-feature="plant_info" ${settings.feature_plant_info ? "checked" : ""}> Plant Info <span class="muted">· free-text details on each plant; hiding it keeps the text</span></label>
       <label class="toggle"><input type="checkbox" data-feature="token_login" ${settings.feature_token_login ? "checked" : ""}> API token sign-in <span class="muted">· sign into the website with an existing API token</span></label>
       <p class="hint" style="margin:0">A quick link can only log or snooze its own task. Set "App address for links" under Notifications so the links in alerts work away from home. If a link ever ends up somewhere it shouldn't, reset them all.</p>
       <div><button class="small" id="ql-reset">Reset all quick links</button></div>
