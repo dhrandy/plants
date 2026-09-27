@@ -100,6 +100,17 @@ def test_core_flow_and_layout(app_url, width, height):
         page.get_by_role("button", name="Add plant").last.click()
         expect(page.get_by_role("heading", name=f"Snake {width}")).to_be_visible()
         expect(page.locator(".notes")).to_contain_text("overwater")
+        page.get_by_role("heading", name="Info", exact=True).wait_for()
+        page.get_by_role("button", name="Edit", exact=True).click()
+        page.locator("#f-info").fill("Bright indirect light; keep out of hot sun.")
+        page.get_by_role("button", name="Save", exact=True).click()
+        expect(page.get_by_role("heading", name="Info", exact=True).locator(".."))\
+            .to_contain_text("Bright indirect light; keep out of hot sun.")
+        page.get_by_role("button", name="Edit", exact=True).click()
+        expect(page.locator("#f-info")).to_have_value("Bright indirect light; keep out of hot sun.")
+        page.get_by_role("button", name="Cancel", exact=True).click()
+        assert page.evaluate("document.documentElement.scrollWidth") <= width
+        page.screenshot(path=f"/tmp/plants-info-{width}.png", full_page=True)
         # settings renders, weather card handles offline
         page.get_by_role("link", name="Settings", exact=True).click()
         expect(page.get_by_role("heading", name="Weather location")).to_be_visible()
