@@ -32,7 +32,7 @@ Plants is a simple household plant care log with reminders. It shows what needs 
    docker run -d --name plants -p 8653:8000 -v ./data:/app/data -e TZ=America/Chicago ghcr.io/dhrandy/plants:latest
    ```
 
-   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.2.0`.
+   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.3.0`.
 
    Or with Docker Compose. Save this as `docker-compose.yml` (the repo includes the same file):
 
@@ -94,14 +94,14 @@ Any tool that accepts a compose file works: paste the block above into a new sta
 - **Today view**: Overdue, Today, and Next 7 days, with the reason for each due date ("every 7 days, last done Sep 20"). Filter by room.
 - **Done, Snooze, Skip**: Done logs the care. Snooze pushes it 1, 3, 7, or any number of days; snoozed tasks show a "Snoozed to" badge and an **Unsnooze** button. **Snooze plant** (or the "all due tasks" box in the snooze menu) snoozes everything due on a plant at once. Skip means you checked and it doesn't need it yet; the cycle restarts from today without changing the last-watered date. **Log…** on a plant lets you backdate care and add a note.
 - **Batch care**: tick several plants (or **Select all** in a section, filtered by room) and mark them done, snoozed, or skipped at once.
-- **Plant profiles**: name, species (whatever the tag says), room, light, pot size and material, acquired date, indoor or outdoor, care notes, and a care source link.
+- **Plant profiles**: name, species (whatever the tag says), room, light, pot size and material, acquired date, indoor or outdoor, **Info** (free text about the plant), care notes, and a care source link. Info is separate from care notes, so existing notes stay as they are.
 - **Care tasks**: watering, fertilizing, misting, repotting, rotating, or custom, each with its own check interval and optional winter interval. All of them show on Today next to watering. When adding a plant, tap **+ Fertilize**, **+ Mist**, **+ Repot**, **+ Rotate** to add a task with a sensible starting interval. Duplicate a plant to copy its setup.
 - **Starter library**: twelve common houseplants that pre-fill species, light, care notes, and conservative starting intervals, each linked to its NC State Extension Plant Toolbox page. Everything stays editable; intervals mean "check the soil", not "water now".
 - **Photo timeline**: every care entry and photo lands on the plant's timeline with who logged it. Pick any timeline photo as the main photo.
 - **Growth timeline** (optional): each plant's photos side by side, oldest first, labeled with the date and how long since the first photo. Tap one to flip through them full size.
 - **One-tap quick links** (optional): every task gets its own link that logs it without signing in, made for the daily notification. See [One-tap quick links](#one-tap-quick-links).
 - **Photo identification**: when adding or editing a plant, identify it from a photo through [Pl@ntNet](https://plantnet.org/) and fill the name and species from the top suggestions. With **care suggestions** on, picking a match also pre-fills starting water, fertilize, and mist intervals. Needs one free API key; see [Photo identification](#photo-identification).
-- **Feature switches**: administrators can turn the growth timeline, care suggestions, and quick links on or off in **Settings → Features**. Turning one off hides it; nothing is deleted.
+- **Feature switches**: administrators can turn the growth timeline, care suggestions, quick links, and Plant Info on or off in **Settings → Features**. Turning one off hides it; nothing is deleted. Info remains in backups and the API even while hidden.
 - **Seasons**: choose your winter months and a winter stretch (x1.25, x1.5, x2), or set a winter interval on a specific task. Nothing changes a schedule behind your back.
 - **Weather**: current conditions and a 5-day forecast (temperature, humidity, rain chance and amount) for a location you pick, with plain hints like "Rain likely tomorrow; outdoor pots may not need water". Weather never changes schedules.
 - **Notifications**: daily digest or one alert per plant through [Apprise](https://github.com/caronc/apprise), with quiet hours, a send-from hour, repeat reminders for overdue plants, and links back to the plant.
@@ -217,8 +217,8 @@ Create a token in **Settings → API tokens** (the token is shown once). Send it
 | --- | --- | --- |
 | GET | `/api/v1/plants` | All plants with tasks and next due dates |
 | GET | `/api/v1/plants/{id}` | One plant |
-| POST | `/api/v1/plants` | Add a plant (name, species, room, notes, tasks) |
-| PATCH | `/api/v1/plants/{id}` | Update some fields |
+| POST | `/api/v1/plants` | Add a plant (name, species, room, `info`, notes, tasks) |
+| PATCH | `/api/v1/plants/{id}` | Update some fields, including `info` (up to 4000 characters) |
 | POST | `/api/v1/plants/{id}/tasks` | Add a care task |
 | POST | `/api/v1/plants/{id}/photos` | Add a photo and/or note (multipart: `photo`, `note`, `date`, `main`) |
 | GET | `/api/v1/due?days=7` | What's overdue, due today, or due soon (each item includes `quick_links` when quick links are on) |
