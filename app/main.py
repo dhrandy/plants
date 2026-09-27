@@ -90,7 +90,7 @@ _api_lock = threading.Lock()
 _weather_cache: dict[str, Any] = {}
 _weather_lock = threading.Lock()
 
-app = FastAPI(title="Plants", version="0.2.0", docs_url=None, openapi_url=None)
+app = FastAPI(title="Plants", version="0.3.0", docs_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------- helpers
@@ -257,6 +257,7 @@ def init_db() -> None:
           pot_material TEXT NOT NULL DEFAULT '',
           light TEXT NOT NULL DEFAULT '',
           notes TEXT NOT NULL DEFAULT '',
+          info TEXT NOT NULL DEFAULT '',
           care_source TEXT NOT NULL DEFAULT '',
           outdoor INTEGER NOT NULL DEFAULT 0,
           photo TEXT,
@@ -309,6 +310,9 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_events_plant ON events(plant_id, date);
         """
         )
+        # Existing SQLite volumes gain Info without replacing or editing care notes.
+        if "info" not in {row[1] for row in c.execute("PRAGMA table_info(plants)")}:
+            c.execute("ALTER TABLE plants ADD COLUMN info TEXT NOT NULL DEFAULT ''")
         if fresh:
             seed_example(c)
 
@@ -669,6 +673,7 @@ def plant_dict(c, row, season=None) -> dict[str, Any]:
         "pot_material": row["pot_material"],
         "light": row["light"],
         "notes": row["notes"],
+        "info": row["info"],
         "care_source": row["care_source"],
         "outdoor": bool(row["outdoor"]),
         "photo": f"/api/photos/{row['photo']}" if row["photo"] else None,
@@ -738,7 +743,7 @@ def apply_care(c, task, action: str, user_id: int, when: str | None = None, days
 
 # ---------------------------------------------------------------- optional features
 
-FEATURES = ("growth_timeline", "quick_links", "care_suggestions", "token_login")
+FEATURES = ("growth_timeline", "quick_links", "care_suggestions", "token_login", "plant_info")
 
 
 def feature_on(c, name: str) -> bool:
@@ -800,6 +805,7 @@ class PlantIn(BaseModel):
     pot_material: str = Field(default="", max_length=40)
     light: str = Field(default="", max_length=120)
     notes: str = Field(default="", max_length=4000)
+    info: str = Field(default="", max_length=4000)
     care_source: str = Field(default="", max_length=300)
     outdoor: bool = False
     tasks: list[TaskIn] | None = None
@@ -828,6 +834,7 @@ class PlantPatch(BaseModel):
     pot_material: str | None = Field(default=None, max_length=40)
     light: str | None = Field(default=None, max_length=120)
     notes: str | None = Field(default=None, max_length=4000)
+    info: str | None = Field(default=None, max_length=4000)
     care_source: str | None = Field(default=None, max_length=300)
     outdoor: bool | None = None
 
@@ -963,11 +970,11 @@ def create_plant(c, body: PlantIn, user_id: int, via: str = "") -> int:
     stamp = now_iso()
     room_id = resolve_room(c, body.room_id, body.room)
     pid = c.execute(
-        """INSERT INTO plants(name,species,room_id,acquired,pot_size,pot_material,light,notes,
-        care_source,outdoor,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO plants(name,species,room_id,acquired,pot_size,pot_material,light,notes,info,
+        care_source,outdoor,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.name.strip(), body.species.strip(), room_id, body.acquired, body.pot_size.strip(),
-            body.pot_material.strip(), body.light.strip(), body.notes.strip(), body.care_source,
+            body.pot_material.strip(), body.light.strip(), body.notes.strip(), body.info.strip(), body.care_source,
             int(body.outdoor), user_id, stamp, stamp,
         ),
     ).lastrowid
@@ -981,7 +988,7 @@ def patch_plant(c, plant_id: int, body: PlantPatch | PlantIn) -> None:
     row = get_plant_row(c, plant_id)
     data = body.model_dump(exclude_unset=True)
     fields = {}
-    for key in ("name", "species", "acquired", "pot_size", "pot_material", "light", "notes", "care_source"):
+    for key in ("name", "species", "acquired", "pot_size", "pot_material", "light", "notes", "info", "care_source"):
         if key in data:
             val = data[key]
             fields[key] = val.strip() if isinstance(val, str) else val
@@ -1051,11 +1058,11 @@ def duplicate_plant(plant_id: int, request: Request):
         row = get_plant_row(c, plant_id)
         stamp = now_iso()
         pid = c.execute(
-            """INSERT INTO plants(name,species,room_id,acquired,pot_size,pot_material,light,notes,
-            care_source,outdoor,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO plants(name,species,room_id,acquired,pot_size,pot_material,light,notes,info,
+            care_source,outdoor,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 f"{row['name']} (copy)", row["species"], row["room_id"], row["acquired"], row["pot_size"],
-                row["pot_material"], row["light"], row["notes"], row["care_source"], row["outdoor"],
+                row["pot_material"], row["light"], row["notes"], row["info"], row["care_source"], row["outdoor"],
                 user["id"], stamp, stamp,
             ),
         ).lastrowid
@@ -1751,6 +1758,7 @@ SETTINGS_DEFAULTS = {
     "feature_quick_links": "1",
     "feature_care_suggestions": "1",
     "feature_token_login": "1",
+    "feature_plant_info": "1",
 }
 
 
@@ -1776,6 +1784,7 @@ class SettingsIn(BaseModel):
     feature_quick_links: bool | None = None
     feature_care_suggestions: bool | None = None
     feature_token_login: bool | None = None
+    feature_plant_info: bool | None = None
 
     @field_validator("winter_months")
     @classmethod
