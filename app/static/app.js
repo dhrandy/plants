@@ -105,25 +105,22 @@ async function showAuth() {
   $("#top").hidden = true;
   const status = await api("/api/status", { allow401: true });
   const setup = status.setup_required;
-  let useToken = false;
   const renderForm = () => {
     $("#view").innerHTML = `
       <form class="card auth stack" id="auth-form">
         <div class="auth-logo"><img src="/static/icon.svg" alt="" width="40" height="40">${esc(status.app_name)}</div>
         <h1>${setup ? "Set up Plants" : "Sign in"}</h1>
         ${setup ? '<p class="muted">Create the first account. It becomes the administrator.</p>' : ""}
-        ${useToken ? `<div><label for="token">API token</label><input id="token" name="token" type="password" autocomplete="off" required></div>` : `
-          <div><label for="username">Username</label><input id="username" name="username" autocomplete="username" required></div>
-          <div><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required minlength="8"></div>`}
+        <div><label for="username">Username</label><input id="username" name="username" autocomplete="username" ${setup ? "required" : ""}></div>
+        <div><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required ${setup ? 'minlength="8"' : ""}></div>
         <p class="error" id="auth-error"></p>
         <button class="primary" type="submit">${setup ? "Create administrator" : "Sign in"}</button>
-        ${!setup && status.token_login_enabled ? `<button class="ghost" id="auth-mode" type="button">${useToken ? "Use username and password" : "Use API token"}</button>` : ""}
       </form>`;
-    if ($("#auth-mode")) $("#auth-mode").onclick = () => { useToken = !useToken; renderForm(); };
     $("#auth-form").onsubmit = async (e) => {
       e.preventDefault();
-      const body = useToken ? { token: $("#token").value } :
-        { username: $("#username").value, password: $("#password").value };
+      const username = $("#username").value.trim();
+      const password = $("#password").value;
+      const body = { username, password };
       try {
         await api(setup ? "/api/setup" : "/api/login", { method: "POST", body, allow401: true });
         await boot();

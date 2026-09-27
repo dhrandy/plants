@@ -68,6 +68,13 @@ def test_token_sign_in_session_controls_and_rate_limit(tmp_path, monkeypatch):
     with TestClient(main.app) as c:
         assert c.post("/api/login", json={"token": token}).status_code == 200
         assert c.get("/api/me").json()["username"] == "admin-test"
+        c.post("/api/logout")
+        assert c.post("/api/login", json={"username": "", "password": token}).status_code == 200
+        assert c.get("/api/me").json()["username"] == "admin-test"
+        assert c.post("/api/logout").status_code == 200
+        assert c.post("/api/login", json={"username": "admin-test", "password": token}).status_code == 401
+        assert c.post("/api/login", json={"username": "", "password": "pla_wrong"}).status_code == 401
+        assert c.post("/api/login", json={"username": "", "password": token}).status_code == 200
         assert c.get("/api/settings").status_code == 200
         assert c.post("/api/logout").status_code == 200
         assert c.get("/api/me").status_code == 401
@@ -102,9 +109,10 @@ def test_token_sign_in_session_controls_and_rate_limit(tmp_path, monkeypatch):
     with TestClient(main.app) as admin:
         assert admin.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
         assert admin.put("/api/settings", json={"feature_token_login": False}).json()["feature_token_login"] is False
-        assert admin.get("/api/status").json()["token_login_enabled"] is False
+        assert "token_login_enabled" not in admin.get("/api/status").json()
         admin.post("/api/logout")
         assert admin.post("/api/login", json={"token": token}).status_code == 401
+        assert admin.post("/api/login", json={"username": "", "password": token}).status_code == 401
         assert admin.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
         admin.put("/api/settings", json={"feature_token_login": True})
         tokens = admin.get("/api/tokens").json()

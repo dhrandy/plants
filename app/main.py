@@ -90,7 +90,7 @@ _api_lock = threading.Lock()
 _weather_cache: dict[str, Any] = {}
 _weather_lock = threading.Lock()
 
-app = FastAPI(title="Plants", version="0.3.0", docs_url=None, openapi_url=None)
+app = FastAPI(title="Plants", version="0.3.1", docs_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------- helpers
@@ -494,9 +494,7 @@ def status():
     with db() as c:
         setup_required = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         name = get_setting(c, "app_name", "Your Plants")
-        token_login_enabled = get_setting(c, "feature_token_login", "1") == "1"
-    return {"setup_required": setup_required, "app_name": name,
-            "token_login_enabled": token_login_enabled}
+    return {"setup_required": setup_required, "app_name": name}
 
 
 @app.post("/api/setup")
@@ -523,10 +521,13 @@ def login(body: LoginCredentials, request: Request, response: Response):
         raise HTTPException(
             429, "Too many login attempts. Try again later.", headers={"Retry-After": str(retry)}
         )
-    if body.token:
+    # The normal password field also accepts a token when Username is empty.
+    # Keep the sign-in screen free of token-related controls and hints.
+    token_value = body.token or (body.password if not body.username and body.password.startswith("pla_") else "")
+    if token_value:
         with db() as c:
             enabled = get_setting(c, "feature_token_login", "1") == "1"
-        row = token_owner(body.token) if enabled and not (body.username or body.password) else None
+        row = token_owner(token_value) if enabled and not body.username and not (body.token and body.password) else None
     else:
         with db() as c:
             row = c.execute(
