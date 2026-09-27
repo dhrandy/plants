@@ -645,3 +645,32 @@ def test_feature_toggles_and_care_suggestions(tmp_path):
         m.post("/api/login", json={"username": "member-test", "password": "password-123"})
         assert m.put("/api/settings", json={"feature_quick_links": False}).status_code == 403
         assert m.post("/api/quick-links/reset").status_code == 403
+
+
+def test_plant_info_roundtrip_toggle_duplicate_backup_and_migration(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        plant = c.post('/api/plants', json={'name': 'Orchid', 'info': 'Grocery hybrid', 'notes': 'Old care note'}).json()
+        pid = plant['id']
+        assert plant['info'] == 'Grocery hybrid'
+        tok = c.post('/api/tokens', json={'name': 'Info updater'}).json()['token']
+        h = {'Authorization': f'Bearer {tok}'}
+        assert c.patch(f'/api/v1/plants/{pid}', headers=h, json={'info': '  Bright indirect light  '}).json()['info'] == 'Bright indirect light'
+        assert c.get(f'/api/plants/{pid}').json()['notes'] == 'Old care note'
+        assert c.patch(f'/api/v1/plants/{pid}', headers=h, json={'info': 'x' * 4001}).status_code == 422
+        assert c.put('/api/settings', json={'feature_plant_info': False}).json()['feature_plant_info'] is False
+        assert c.get(f'/api/plants/{pid}').json()['info'] == 'Bright indirect light'
+        dup = c.post(f'/api/plants/{pid}/duplicate').json()
+        assert dup['info'] == 'Bright indirect light'
+        backup = c.get('/api/export').json()
+        assert any(row['id'] == pid and row['info'] == 'Bright indirect light' for row in backup['tables']['plants'])
+        assert c.patch(f'/api/v1/plants/{pid}', headers=h, json={'info': ''}).json()['info'] == ''
+    with main.db() as db:
+        db.execute('ALTER TABLE plants RENAME TO plants_with_info')
+        db.execute('CREATE TABLE plants AS SELECT id, name, species, room_id, acquired, pot_size, pot_material, light, notes, care_source, outdoor, photo, created_by, created_at, updated_at FROM plants_with_info')
+        db.execute('DROP TABLE plants_with_info')
+    main.init_db()
+    with main.db() as db:
+        assert 'info' in {r[1] for r in db.execute('PRAGMA table_info(plants)')}
+        assert db.execute('SELECT info FROM plants WHERE id=?', (pid,)).fetchone()['info'] == ''
