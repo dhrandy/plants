@@ -32,7 +32,7 @@ Plants is a simple household plant care log with reminders. It shows what needs 
    docker run -d --name plants -p 8653:8000 -v ./data:/app/data -e TZ=America/Chicago ghcr.io/dhrandy/plants:latest
    ```
 
-   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.3.0`.
+   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.3.1`.
 
    Or with Docker Compose. Save this as `docker-compose.yml` (the repo includes the same file):
 
@@ -242,11 +242,15 @@ curl -X POST http://your-server:8653/api/v1/plants \
 
 Entries made through a token are attributed to the token's owner and show the token name on the timeline. Tokens are limited to 100 requests a minute; repeated bad tokens are blocked for 15 minutes.
 
-### Sign in with an API token
+### Sign in with an API token (for AI agents)
 
-On the website sign-in screen, choose **Use API token** and paste an existing token from Settings. This creates the same browser session as a username/password sign-in, with the token owner's account and permissions. The regular bearer-token API remains unchanged. A token is only shown when created; if you no longer have it, create a new one while signed in normally. Revoked tokens or tokens owned by inactive users cannot start new sessions. Sign out on shared devices, and revoke a token if it is exposed.
+The sign-in page intentionally does **not** advertise token sign-in. An AI agent with a token can leave **Username** empty, put the existing API token into the masked **Password** field, and press **Sign in**. Do not put the token in the URL, page source, logs, or a chat message. A token is only shown when created in Settings; copy it to a secure secret store. Revoked tokens and tokens owned by inactive users cannot start sessions. The regular bearer-token API is unchanged.
 
-An administrator can hide and disable this sign-in option under **Settings → Features → API token sign-in**. It is on by default; the option does not appear during first-time setup. Both sign-in methods share the limit of five failed attempts per 15 minutes per IP. The token is sent in the POST body over HTTPS, never in the URL or application logs. Set `PLANTS_COOKIE_SECURE=true` when serving the site through HTTPS.
+Paste-ready AI connection prompt (replace placeholders privately, and give the token to your agent through its secure credential store, not this prompt):
+
+> Connect to my Plants app at `https://YOUR-PLANTS-HOST`. I will provide my existing API token through a secure credential store. Use `Authorization: Bearer <PLANTS_API_TOKEN>` with the API at `/api/v1/` (docs at `/api/docs`). If you need to sign into the website, leave Username blank and enter that token in the masked Password field. Never put the token in a URL, source file, prompt, or log. Check soil before logging a watering; a due reminder is not an order to water.
+
+Administrators can disable token sign-in under **Settings → Features → API token sign-in**. It is on by default and unavailable during first-time setup. Token and password sign-in share the limit of five failed attempts per 15 minutes per IP. The token is sent in the POST body over HTTPS, never in the URL or application logs. Set `PLANTS_COOKIE_SECURE=true` when serving the site through HTTPS.
 
 ## Mobile layout
 
