@@ -812,3 +812,50 @@ def test_plant_info_roundtrip_toggle_duplicate_backup_and_migration(tmp_path):
     with main.db() as db:
         assert 'info' in {r[1] for r in db.execute('PRAGMA table_info(plants)')}
         assert db.execute('SELECT info FROM plants WHERE id=?', (pid,)).fetchone()['info'] == ''
+
+
+def test_docs_and_schema_require_auth(tmp_path):
+    fresh(tmp_path)
+    routes = ("/api/docs", "/api/openapi.json")
+    with TestClient(main.app) as admin:
+        setup_admin(admin)
+        created = admin.post("/api/tokens", json={"name": "Docs test"}).json()
+        token = created["token"]
+        token_id = admin.get("/api/tokens").json()[0]["id"]
+        for route in routes:
+            assert admin.get(route).status_code == 200
+            # An invalid bearer token must not fall back to a valid session.
+            assert admin.get(route, headers={"Authorization": "Bearer invalid"}).status_code == 401
+
+        with TestClient(main.app) as visitor:
+            for route in routes:
+                response = visitor.get(route)
+                assert response.status_code == 401
+                assert response.json() == {"detail": "Not signed in"}
+                assert "swagger-ui" not in response.text
+                assert "paths" not in response.json()
+                assert visitor.get(route, headers={"Authorization": "Bearer invalid"}).status_code == 401
+                response = visitor.get(route, headers={"Authorization": f"bEaReR {token}"})
+                assert response.status_code == 200
+                if route == "/api/docs":
+                    assert "/api/openapi.json" in response.text
+                else:
+                    assert response.json()["paths"]
+
+            assert visitor.post("/api/login", json={"token": token}).status_code == 200
+            for route in routes:
+                assert visitor.get(route).status_code == 200
+            assert visitor.post("/api/logout").status_code == 200
+
+            # Test revocation separately from the failed-token rate limit above.
+            main._api_failures.clear()
+            assert admin.delete(f"/api/tokens/{token_id}").status_code == 200
+            for route in routes:
+                assert visitor.get(route, headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+            # A stale cookie is not an authenticated session.
+            visitor.cookies.set(main.COOKIE, "expired-test-session")
+            for route in routes:
+                response = visitor.get(route)
+                assert response.status_code == 401
+                assert response.json() == {"detail": "Session expired"}

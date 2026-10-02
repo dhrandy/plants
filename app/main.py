@@ -90,7 +90,7 @@ _api_lock = threading.Lock()
 _weather_cache: dict[str, Any] = {}
 _weather_lock = threading.Lock()
 
-app = FastAPI(title="Plants", version="0.3.3", docs_url=None, openapi_url=None)
+app = FastAPI(title="Plants", version="0.3.4", docs_url=None, openapi_url=None)
 
 
 # ---------------------------------------------------------------- helpers
@@ -401,6 +401,8 @@ def public_user(row) -> dict[str, Any]:
 # weather, photo reads, timelines, interval edits, and deletes all need a
 # username-and-password sign-in. Anything not listed here is denied by default.
 TOKEN_SESSION_ALLOWED = (
+    ("GET", re.compile(r"/api/docs")),
+    ("GET", re.compile(r"/api/openapi\.json")),
     ("GET", re.compile(r"/api/me")),
     ("GET", re.compile(r"/api/plants")),
     ("POST", re.compile(r"/api/plants")),
@@ -2131,13 +2133,23 @@ def v1_openapi() -> dict[str, Any]:
     return schema
 
 
+def require_docs_access(request: Request) -> None:
+    """API docs and schema need a signed-in session or a valid API token."""
+    if request.headers.get("authorization", "").lower().startswith("bearer "):
+        token_auth(request)
+        return
+    current_user(request)
+
+
 @app.get("/api/openapi.json", include_in_schema=False)
-def openapi_json():
+def openapi_json(request: Request):
+    require_docs_access(request)
     return JSONResponse(v1_openapi())
 
 
 @app.get("/api/docs", include_in_schema=False)
-def api_docs():
+def api_docs(request: Request):
+    require_docs_access(request)
     return get_swagger_ui_html(openapi_url="/api/openapi.json", title="Plants API")
 
 

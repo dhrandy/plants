@@ -32,7 +32,7 @@ Plants is a simple household plant care log with reminders. It shows what needs 
    docker run -d --name plants -p 8653:8000 -v ./data:/app/data -e TZ=America/Chicago ghcr.io/dhrandy/plants:latest
    ```
 
-   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.3.3`.
+   The examples pull `latest`. To pin a version instead, use a version tag such as `ghcr.io/dhrandy/plants:v0.3.4`.
 
    Or with Docker Compose. Save this as `docker-compose.yml` (the repo includes the same file):
 
@@ -211,7 +211,7 @@ Each task can have a quick link like `https://plants.example.com/q/<random-code>
 
 ## API tokens
 
-Create a token in **Settings → API tokens** (the token is shown once). Send it as `Authorization: Bearer <token>`. Interactive docs are at `/api/docs`.
+Create a token in **Settings → API tokens** (the token is shown once). Send it as `Authorization: Bearer <token>`. Interactive docs are at `/api/docs`. Both the docs and `/api/openapi.json` require a signed-in session or a valid API bearer token.
 
 | Method | Path | What it does |
 | --- | --- | --- |
