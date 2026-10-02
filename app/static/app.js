@@ -14,6 +14,8 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 const state = { me: null, settings: null, roomFilter: "all", selected: new Set(), search: "", plantRoom: "all" };
 
+let viewRevision = 0;
+
 class ApiError extends Error {}
 
 async function api(path, opts = {}) {
@@ -102,6 +104,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#mod
 // ---------------------------------------------------------------- auth
 
 async function showAuth() {
+  ++viewRevision;
   $("#top").hidden = true;
   const status = await api("/api/status", { allow401: true });
   const setup = status.setup_required;
@@ -121,11 +124,22 @@ async function showAuth() {
       const username = $("#username").value.trim();
       const password = $("#password").value;
       const body = { username, password };
+      const button = $("button[type=submit]", e.currentTarget);
+      if (button.disabled) return;
+      button.disabled = true;
+      button.textContent = setup ? "Creating administrator..." : "Signing in...";
+      $("#auth-error").textContent = "";
       try {
         await api(setup ? "/api/setup" : "/api/login", { method: "POST", body, allow401: true });
         await boot();
       } catch (err) {
-        $("#auth-error").textContent = err.message;
+        const error = $("#auth-error");
+        if (error) error.textContent = err.message;
+      } finally {
+        if (button.isConnected) {
+          button.disabled = false;
+          button.textContent = setup ? "Create administrator" : "Sign in";
+        }
       }
     };
   };
@@ -162,10 +176,12 @@ async function boot() {
   $("#top").hidden = false;
   $("#user-badge").textContent = state.me.username + (state.me.token_session ? " (token)" : "");
   $$(".tab").forEach((t) => { t.hidden = state.me.token_session && t.dataset.tab === "settings"; });
+  $("#view").innerHTML = '<section class="card" aria-busy="true"><p class="muted">Loading plants...</p></section>';
   route();
 }
 
 async function route() {
+  ++viewRevision;
   if (!state.me) return;
   closeModal();
   const hash = location.hash || "#/";
@@ -238,10 +254,12 @@ function dueRow(i) {
 }
 
 async function renderToday() {
-  const [due, weather] = await Promise.all([
-    api("/api/due?days=7"),
-    api("/api/weather").catch(() => ({ configured: true, error: "Weather unavailable right now." })),
-  ]);
+  const revision = ++viewRevision;
+  // Weather is optional: a cold upstream fetch must not hold up the care list.
+  const weather = api("/api/weather", { allow401: true })
+    .catch(() => ({ configured: true, location: "Weather", error: "Weather unavailable right now." }));
+  const due = await api("/api/due?days=7");
+  if (revision !== viewRevision || !state.me) return;
   const rooms = [...new Set(due.items.map((i) => i.room || "No room"))].sort();
   if (state.roomFilter !== "all" && !rooms.includes(state.roomFilter)) state.roomFilter = "all";
   const dueByPlant = {};
@@ -257,7 +275,7 @@ async function renderToday() {
   ];
   const needNow = groups[0][2].length + groups[1][2].length;
   $("#view").innerHTML = `
-    ${weatherHtml(weather)}
+    <section class="card weather" id="weather" aria-busy="true"><div class="muted">Loading weather...</div></section>
     <div class="pagehead"><div><h1>Today</h1>
       <div class="muted">${needNow ? `${needNow} thing${needNow === 1 ? "" : "s"} to check. Feel the soil first; Skip if it's still moist.` : "Nothing due. Nice."}</div></div>
     </div>
@@ -282,6 +300,12 @@ async function renderToday() {
       <button class="ghost" data-batch="clear">Clear</button>
     </div>`;
   updateBatchBar();
+  weather.then((result) => {
+    if (revision !== viewRevision || !state.me) return;
+    const region = $("#weather");
+    if (region) region.outerHTML = weatherHtml(result);
+  });
+
   $$("[data-room]").forEach((b) => (b.onclick = () => { state.roomFilter = b.dataset.room; state.selected.clear(); renderToday(); }));
   $$("[data-select]").forEach((cb) => (cb.onchange = () => {
     const id = Number(cb.dataset.select);

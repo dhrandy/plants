@@ -392,3 +392,77 @@ def test_api_token_sign_in_ui(app_url, width, height):
         page.get_by_role("link", name="Settings", exact=True).click()
         page.locator('[data-feature="token_login"]').check()
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 900), (390, 844)])
+def test_sign_in_does_not_wait_for_weather(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(app_url)
+        page.locator("#auth-form").wait_for()
+        page.locator("#username").fill("admin-test")
+        page.locator("#password").fill("password-123")
+        login = []
+        weather = []
+        page.route("**/api/login", lambda route: login.append(route))
+        page.route("**/api/weather", lambda route: weather.append(route))
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        expect(page.get_by_role("button", name="Signing in...")).to_be_disabled()
+        assert len(login) == 1
+        login[0].continue_()
+        expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
+        expect(page.locator("#auth-form")).to_have_count(0)
+        expect(page.locator("#weather")).to_contain_text("Loading weather...")
+        expect(page.locator(".due").first).to_be_visible()
+        page.screenshot(path=f"/tmp/plants-fast-login-{width}.png", full_page=True)
+        assert len(weather) == 1
+        weather[0].fulfill(status=200, content_type="application/json", body=json.dumps({
+            "configured": True, "location": "Test weather", "error": "Weather arrived separately"}))
+        expect(page.locator("#weather")).to_contain_text("Weather arrived separately")
+        expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
+        browser.close()
+
+
+def test_late_weather_cannot_replace_another_route_or_newer_render(app_url):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        weather = []
+        page.route("**/api/weather", lambda route: weather.append(route))
+        sign_in(page, app_url)
+        assert len(weather) == 1
+        page.get_by_role("link", name="Plants", exact=True).click()
+        expect(page.get_by_role("heading", name="Plants", exact=True)).to_be_visible()
+        weather[0].fulfill(status=200, content_type="application/json", body=json.dumps({
+            "configured": True, "location": "Old route", "error": "Old weather"}))
+        expect(page.locator("#weather")).to_have_count(0)
+        page.get_by_role("link", name="Today", exact=True).click()
+        expect(page.get_by_role("heading", name="Today", exact=True)).to_be_visible()
+        expect(page.locator("#weather")).to_contain_text("Loading weather...")
+        page.evaluate("refresh()")
+        expect(page.locator("#weather")).to_contain_text("Loading weather...")
+        assert len(weather) == 3
+        weather[2].fulfill(status=200, content_type="application/json", body=json.dumps({
+            "configured": True, "location": "Newest", "error": "Newest weather"}))
+        expect(page.locator("#weather")).to_contain_text("Newest weather")
+        weather[1].fulfill(status=200, content_type="application/json", body=json.dumps({
+            "configured": True, "location": "Older", "error": "Older weather"}))
+        # Give the older response a full browser turn, then inspect the region.
+        page.wait_for_function("document.querySelector('#weather').textContent.includes('Newest weather')")
+        expect(page.locator("#weather")).not_to_contain_text("Older weather")
+        browser.close()
+
+
+def test_sign_in_failure_restores_submit_button(app_url):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.goto(app_url)
+        page.locator("#auth-form").wait_for()
+        page.locator("#username").fill("admin-test")
+        page.locator("#password").fill("wrong-password")
+        page.get_by_role("button", name="Sign in", exact=True).click()
+        expect(page.locator("#auth-error")).to_contain_text("Invalid sign-in credentials")
+        expect(page.get_by_role("button", name="Sign in", exact=True)).to_be_enabled()
+        browser.close()
