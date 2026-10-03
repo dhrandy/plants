@@ -2,6 +2,19 @@ name: Test, build and publish Docker image
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
+      - '*.png'
+      - '*.jpg'
+      - '*.jpeg'
+      - '*.gif'
+      - '*.svg'
+      - '*.webp'
+      - '*.ico'
+      - 'LICENSE'
+      - 'LICENSE.*'
   workflow_dispatch:
 permissions:
   contents: read
