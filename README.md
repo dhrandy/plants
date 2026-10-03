@@ -1,3 +1,5 @@
+![Plants app banner](docs/banner.png)
+
 # Plants
 
 [![Beta](https://img.shields.io/badge/status-beta-orange)](https://github.com/dhrandy/plants)
